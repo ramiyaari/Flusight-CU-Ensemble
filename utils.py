@@ -274,7 +274,7 @@ def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, smooth=
                 ratio = None
                 max_hosp = df_hosp[(df_hosp['year'] == year)][state].max()
                 max_ili = df_ili[(df_ili['year'] == year)][state].max()
-                if not np.isnan(max_hosp) and max_ili>0:
+                if (not np.isnan(max_hosp)) and (not np.isnan(max_ili)) and (max_ili>0):
                     ratio = max_hosp / max_ili
                 state_ratios.append(ratio)
             valid_ratios = [r for r in state_ratios if r is not None and np.isfinite(r)]
@@ -775,7 +775,7 @@ def calc_and_plot_pred_results_fit(df_results, df_dat, locations, loc_abbr, alph
 
 def map_week_to_week_season(week):
     if week >= 40:  # Weeks 40–52
-        return week - 39
+        return week - 40
     else:  # Weeks 1–39
         return week + 12
         
@@ -879,6 +879,7 @@ def generate_peak_week_pred(df_his_stats, locations, ref_date, last_date,
 
     df_peak_week_inc = df_his_stats['peak_value_quantiles'].copy()
     df_peak_week_prob = df_his_stats['peak_week_probabilities'].copy()
+    df_peak_week_prob_combnined = df_his_stats['peak_week_probabilities_combined'].copy()
 
     epiweek = date_to_epiweek(ref_date)[1]
     epiweek_last = date_to_epiweek(last_date)[1]
@@ -902,10 +903,15 @@ def generate_peak_week_pred(df_his_stats, locations, ref_date, last_date,
     for loc_abbr in locations_abbr:
         location = locations.loc[loc_abbr].location
         df_peak_week_prob_state = df_peak_week_prob[df_peak_week_prob.state==loc_abbr]
+        if(df_peak_week_prob_state.shape[0]<5):
+            print(f"Not enough data points for state {loc_abbr} - using combined data")
+            df_peak_week_prob_state = df_peak_week_prob_combnined
+
+        # FIX - what if we are passed the peak?
         df_peak_week_prob_state.loc[df_peak_week_prob_state.week_season<epiweek_season,'probability'] = 0
         df_peak_week_prob_state.loc[df_peak_week_prob_state.week_season>epiweek_season_last,'probability'] = 0
         df_peak_week_prob_state.loc[:,'probability'] = df_peak_week_prob_state.loc[:,'probability']/df_peak_week_prob_state['probability'].sum()
-        probs = fit_smooth_distribution_using_kde(df_peak_week_prob, bandwidth=kde_bandwith)
+        probs = fit_smooth_distribution_using_kde(df_peak_week_prob_state, bandwidth=kde_bandwith)
         probs.loc[probs.week_season<epiweek_season,'smooth_probability'] = 0
         probs.loc[probs.week_season>epiweek_season_last,'smooth_probability'] = 0
         probs['smooth_probability'] = probs['smooth_probability']/probs['smooth_probability'].sum()
@@ -933,9 +939,10 @@ def generate_peak_week_pred(df_his_stats, locations, ref_date, last_date,
             plt.title(f"Peak week distribution for {loc_abbr}")
             plt.show()
 
-    df_pred_results = pd.DataFrame(pred_results,columns=['reference_date','target','horizon','target_end_date',
-                                                         'location','output_type','output_type_id','value']) 
-    return df_pred_results
+    df_results = pd.DataFrame(pred_results,columns=['reference_date','target','horizon','target_end_date',
+                                                    'location','output_type','output_type_id','value'])
+    df_results['reference_date'] = pd.to_datetime(df_results['reference_date'], format='%Y-%m-%d')
+    return df_results
 
 
 def save_pred_peak_with_model_pred(df_pred_peak, basedir, model_desc, locations, ref_date):
