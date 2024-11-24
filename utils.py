@@ -620,11 +620,10 @@ def generate_pred_weights(results_dict, df_metrics, metric, weights_win, locatio
             df_metrics_hl = df_metrics_hl.fillna(1e4)
             df_metrics_hl = np.clip(df_metrics_hl,1,np.inf)
             df_metrics_hl = df_metrics_hl.apply(lambda row : 1/row, axis = 1)
-            df_metrics_hl = df_metrics_hl.apply(lambda row : row/sum(row), axis = 1)
-            for t in ref_dates[0:(weights_win+horizon-1)]:   
+            for t in ref_dates[0:(weights_win+horizon)]:   
                 df_weights.append(np.concatenate((np.array([horizon,loc_abbr,t]),np.array([1/len(models)]*len(models)))))
-            for t in ref_dates[(weights_win+horizon-1):len(ref_dates)]:
-                df_metrics_hlt = df_metrics_hl[(df_metrics_hl.index<t-pd.Timedelta(weeks=horizon-1)) & (df_metrics_hl.index>=t-pd.Timedelta(weeks=weights_win+horizon-1))]
+            for t in ref_dates[(weights_win+horizon):len(ref_dates)]:
+                df_metrics_hlt = df_metrics_hl[(df_metrics_hl.index<t) & (df_metrics_hl.index>=t-pd.Timedelta(weeks=weights_win))]
                 weights = degenerate_em_weights(df_metrics_hlt, models_name=models, tol_stop=1e-4).T
                 df_weights.append(np.concatenate((np.array([horizon,loc_abbr,t]),weights.values[0,:])))
                   
