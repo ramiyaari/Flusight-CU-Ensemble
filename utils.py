@@ -3,27 +3,14 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from epiweeks import Week
-from datetime import timedelta, datetime, date
-from darts import TimeSeries
-from darts.dataprocessing.transformers import Scaler
-#from darts.metrics import mape, mase, mae, mse, ope, r2_score, rmse, rmsle, quantile_loss
-from darts.utils.missing_values import fill_missing_values
+import epiweeks as ew
+from datetime import timedelta #, datetime, date
 
-#import scipy.stats as st
-from scipy.stats import gaussian_kde
-
-
-#from delphi_epidata import Epidata
-#import inspect
 
 import requests
-import warnings
-import torch
+# import warnings
 import os
 
-# print(darts.__version__)
-# print(torch.cuda.is_available())
 
 
 def date_to_epiweek(date):
@@ -31,13 +18,33 @@ def date_to_epiweek(date):
     This function takes a date and returns a tuple with the year and epidemiological week number.
     It uses the epiweeks package, which is designed to follow the CDC epidemiological week rules.
     """
-    epi_week = Week.fromdate(date)
+    epi_week = ew.Week.fromdate(date)
     return epi_week.year, epi_week.week
 
 
 def epiweek_to_dates(year, epiweek):
-    dates = Week(year, epiweek)
+    dates = ew.Week(year, epiweek)
     return dates
+
+
+def generate_pop_per_week(states, populations):
+    years = list(range(min(populations['year']),max(populations['year'])))
+    dates = []
+    for year in years:
+        for week in ew.Year(year).iterweeks():
+            dates.append(week.startdate()+ timedelta(days=1))
+    dates = pd.to_datetime(dates, format='%m/%d/%Y')
+    df_pop = pd.DataFrame(index=dates,columns=states)
+    for yind, year in enumerate(years):
+        row_ind = df_pop[df_pop.index.year==year].index
+        weeks_num = len(row_ind)
+        for state in states:
+            pop_start = populations[state].values[yind]
+            pop_end = populations[state].values[yind+1]
+            pop_weekly = (np.linspace(start=pop_start, stop=pop_end, num=weeks_num+1)).astype('int')
+            df_pop.loc[row_ind,state] = pop_weekly[:-1]
+    df_pop = df_pop.astype(np.double)
+    return (df_pop)
 
 
 def format_hosp_data_2024(filename, states):
@@ -259,7 +266,7 @@ def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, smooth=
     else:
         df_ili = pd.read_csv(ili_data_fname)
 
-    df_ili['date'] = pd.to_datetime(df_ili['date'], format='%Y-%m-%d')       
+    df_ili['date'] = pd.to_datetime(df_ili['date'], format='%Y-%m-%d') #format='%m/%d/%Y') #        
     if(smooth):
         df_ili.iloc[:, 3:] = df_ili.iloc[:, 3:].astype(float)
         df_ili.iloc[:, 3:] = df_ili.iloc[:, 3:].rolling(window=3, min_periods=1).mean()
@@ -295,145 +302,6 @@ def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, smooth=
 
     return (df_ili)
 
-#Return a TimeSeries object for all given states
-def get_states_timeseries(df, states):
-    series = TimeSeries.from_dataframe(df, 
-                                       time_col='date', 
-                                       value_cols=states,
-                                       fill_missing_dates=True, 
-                                       freq="W-SAT")
-    series = fill_missing_values(series)
-    series = series.astype(np.float32)  
-    return series
-
-
-def fit_and_predict(series, model, model_desc, pred_start_date, weeks_to_predict, num_samples,
-                    series_past_covar, series_future_covar, pred_only=False):
-    
-    last_series_time = series.time_index[series.n_timesteps-1]
-    if(last_series_time < pred_start_date):
-        train = series
-        if(last_series_time + timedelta(weeks=1) != pred_start_date):
-            print('missing values between end of training data and prediction start time...')
-    else:
-        train, _ = series.split_before(pred_start_date)
-
-    transformer = Scaler()
-    train_transformed = transformer.fit_transform(train)
-
-    if(series_past_covar is not None):
-        if(np.isnan(series_past_covar.values()).all()):
-            series_past_covar = None
-        else:
-            series_past_covar = Scaler().fit_transform(series_past_covar)
-    if(series_future_covar is not None):
-        if(np.isnan(series_future_covar.values()).all()):
-            series_future_covar = None
-        else:
-            series_future_covar = Scaler().fit_transform(series_future_covar)
-
-    try:
-        if((not model.supports_past_covariates) and (not model.supports_future_covariates)):
-            if(not pred_only):
-                model.fit(train_transformed)
-            pred = model.predict(weeks_to_predict,num_samples=num_samples)
-        elif((model.supports_past_covariates) and (not model.supports_future_covariates)):
-            if(not pred_only):
-                model.fit(train_transformed,past_covariates=series_past_covar)
-            pred = model.predict(weeks_to_predict,past_covariates=series_past_covar,num_samples=num_samples)
-        elif((not model.supports_past_covariates) and (model.supports_future_covariates)):
-            if(not pred_only):
-                model.fit(train_transformed,future_covariates=series_future_covar)
-            pred = model.predict(weeks_to_predict,future_covariates=series_future_covar,num_samples=num_samples)
-        else:
-            if(not pred_only):
-                model.fit(train_transformed,past_covariates=series_past_covar,future_covariates=series_future_covar) 
-            pred = model.predict(weeks_to_predict, past_covariates=series_past_covar,future_covariates=series_future_covar,num_samples=num_samples)
-
-        pred = transformer.inverse_transform(pred)
-        pred = pred.map(lambda x: np.clip(x,0,np.inf)) 
-
-    except (ValueError, TypeError) as err:
-        warnings.warn(
-            ("Unable to run model {}." +
-                "\nThrows error {}").format(model_desc, err))
-    
-    return (pred)
-
-
-def fit_and_predict_univariate(df, states, model, model_desc, pred_start_date, weeks_to_predict, num_samples, 
-                               fit_single_model, df_past_covar=None, df_future_covar=None):
-
-    pred_all = None
-    series_all = get_states_timeseries(df, states)
-    if(df_past_covar is not None):
-        series_past_covar_all = get_states_timeseries(df_past_covar, states)
-    if(df_future_covar is not None):
-        series_future_covar_all = get_states_timeseries(df_future_covar, states)
-
-    
-    if(not fit_single_model):
-        # fit and predict each state separately
-        for state in states:
-            print("-----------state: {}-----------".format(state))
-            series = series_all[state]
-            series_past_covar = series_past_covar_all[state] if df_past_covar is not None else None
-            series_future_covar = series_future_covar_all[state] if df_future_covar is not None else None
-            model = model.untrained_model()
-            pred = fit_and_predict(series, model, model_desc, pred_start_date, weeks_to_predict, num_samples,
-                                series_past_covar, series_future_covar)
-            if(pred_all is None):
-                pred_all = pred
-            else:
-                pred_all = pred_all.stack(pred)
-    else: 
-        # fit_single_model
-        # first fit all states then predict them
-        for state in states:
-            print("----------- fitting state: {}-----------".format(state))
-            series = series_all[state]
-            series_past_covar = series_past_covar_all[state] if df_past_covar is not None else None
-            series_future_covar = series_future_covar_all[state] if df_future_covar is not None else None
-            fit_and_predict(series, model, model_desc, pred_start_date, weeks_to_predict, num_samples,
-                            series_past_covar, series_future_covar)
-            
-        for state in states:
-            print("----------- predicting state: {}-----------".format(state))
-            series = series_all[state]
-            series_past_covar = series_past_covar_all[state] if df_past_covar is not None else None
-            series_future_covar = series_future_covar_all[state] if df_future_covar is not None else None
-            pred = fit_and_predict(series, model, model_desc, pred_start_date, weeks_to_predict, num_samples,
-                                    series_past_covar, series_future_covar, pred_only=True)
-            pred = pred.with_columns_renamed(col_names=pred.components, col_names_new=[state])
-            if(pred_all is None):
-                pred_all = pred
-            else:
-                pred_all = pred_all.stack(pred)
-
-    return (pred_all)
-    
-
-def fit_and_predict_multivariate(df, states, model, model_desc, pred_start_date, weeks_to_predict, num_samples, 
-                                 df_past_covar=None, df_future_covar=None):
-
-    series = get_states_timeseries(df, states)
-    series_past_covar = None
-    series_future_covar = None
-    if(df_past_covar is not None):
-        series_past_covar = get_states_timeseries(df_past_covar, states)
-    if(df_future_covar is not None):
-        series_future_covar = get_states_timeseries(df_future_covar, states)
-    
-    pred = fit_and_predict(series, model, model_desc, pred_start_date, weeks_to_predict, num_samples,
-                           series_past_covar, series_future_covar)
-    return pred
-
-
-def get_quantiles_df(pred, quantiles):
-    quantiles_df = pred.quantile_df(quantiles[0]).clip(lower=0)
-    for quantile in quantiles[1:]:
-        quantiles_df = quantiles_df.merge(pred.quantile_df(quantile).clip(lower=0),on="date")
-    return (quantiles_df)
 
 
 def calculate_wis(truth, df_pred, alpha_vals):
@@ -455,70 +323,7 @@ def calculate_wis(truth, df_pred, alpha_vals):
     return wis_vals
 
 
-def save_pred_results_to_file(pred, ref_date, model_desc, locations, quantiles, dat_hosp_changerate_ref, basedir):
-   
-    pred_results = []
-    horizons = ((pred.time_index-ref_date).days.values/7).astype(int)
-    locations_abbr = locations.index #pred.components
-    for loc_abbr in locations_abbr:
-        location = locations.loc[loc_abbr].location
-        pred_state = pred[loc_abbr]
 
-        pred_quantiles = get_quantiles_df(pred_state,quantiles)
-        for hind, horizon in enumerate(horizons):
-            for qind, quantile in enumerate(quantiles):
-                pred_results.append([format(ref_date,'%Y-%m-%d'),'wk inc flu hosp', horizon,
-                          format(ref_date + timedelta(weeks=horizon.item()),'%Y-%m-%d'),
-                          location, 'quantile', np.round(quantile,3), pred_quantiles.iloc[hind,qind]])
-
-
-    stable_criteria = [0.3, 0.5, 0.7, 1.0]
-    change_criteria = [1.7, 3.0, 4.0, 5.0]
-
-    locations_abbr = locations.index #pred.components
-    for loc_abbr in locations_abbr:
-        location = locations.loc[loc_abbr].location
-        pop_size = locations.loc[loc_abbr].population
-        hosp_vals = dat_hosp_changerate_ref[loc_abbr].values
-        for horizon in horizons:
-            pred_vals = pred[ref_date+timedelta(weeks=horizon.item())][loc_abbr].all_values()[0][0]
-            cases_change = pred_vals-hosp_vals
-            rate_changes = cases_change/pop_size*1e5
-            num_samples = len(rate_changes)
-            prob_stable = np.sum(np.abs(cases_change) < 10 |
-                                 ((rate_changes>-stable_criteria[horizon]) & 
-                                 (rate_changes<stable_criteria[horizon])))/num_samples
-            prob_increase = np.sum((rate_changes>=stable_criteria[horizon]) & 
-                                   (rate_changes<change_criteria[horizon]))/num_samples
-            prob_large_increase = np.sum(rate_changes>=change_criteria[horizon])/num_samples
-            prob_decrease = np.sum((rate_changes<=-stable_criteria[horizon]) & 
-                                   (rate_changes>-change_criteria[horizon]))/num_samples 
-            prob_large_decrease = np.sum(rate_changes<=-change_criteria[horizon])/num_samples
-
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon.item()),'%Y-%m-%d'),
-                    location, 'pmf', 'stable', prob_stable])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon.item()),'%Y-%m-%d'),
-                    location, 'pmf', 'increase', prob_increase])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon.item()),'%Y-%m-%d'),
-                    location, 'pmf', 'large_increase', prob_large_increase])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon.item()),'%Y-%m-%d'),
-                    location, 'pmf', 'decrease', prob_decrease])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon.item()),'%Y-%m-%d'),
-                    location, 'pmf', 'large_decrease', prob_large_decrease])
-            
-    df_pred_results = pd.DataFrame(pred_results,columns=['reference_date','target','horizon','target_end_date',
-                                                         'location','output_type','output_type_id','value']) 
-    
-    output_dir = "{}/{}".format(basedir, model_desc)
-    if not os.path.isdir(output_dir):
-        os.makedirs(output_dir)
-    df_pred_results.to_csv("{}/{}-CU-{}.csv".format(output_dir,format(ref_date,'%Y-%m-%d'),model_desc), index=False) 
-    return df_pred_results
 
 
 def load_pred_result_files(basedir, model_desc, locations):
@@ -585,7 +390,8 @@ def generate_mean_ensemble_pred_results(results_dict, basedir, ensemble_name):
     df_ensemble = df_ensemble.drop(labels=models,axis=1)
 
     df_ensemble.loc[df_ensemble.target=='wk inc flu hosp','value'] = np.round(df_ensemble.loc[df_ensemble.target=='wk inc flu hosp','value'],0)
-    
+    df_ensemble['location'] = df_ensemble['location'].astype(str).str.zfill(2)
+
     output_dir = "{}/{}".format(basedir, ensemble_name)
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
@@ -606,30 +412,56 @@ def generate_pred_weights(results_dict, df_metrics, metric, weights_win, locatio
     ref_dates = results_dict[models[0]]['reference_date'].unique()
     horizons = results_dict[models[0]]['horizon'].unique()
 
-    df_metrics = df_metrics[(df_metrics.metric==metric) & (df_metrics.model.isin(models))].drop(columns=['metric'])
-    df_metrics['target_date'] = pd.to_datetime(df_metrics['target_date'], format='%Y-%m-%d') 
+    # Filter and preprocess metrics data
+    df_metrics = df_metrics[
+        (df_metrics.metric == metric) & (df_metrics.model.isin(models))
+    ].drop(columns=['metric'])
+    df_metrics['target_date'] = pd.to_datetime(df_metrics['target_date'], format='%Y-%m-%d')
 
     df_weights = []
     for loc_abbr in locations.index:
-        # print("-----------Location: {}-----------".format(loc_abbr))
         for horizon in horizons:
-            # print("-----------Horizon: {}-----------".format(horizon))
-            df_metrics_hl = df_metrics[(df_metrics.location==loc_abbr) & (df_metrics.horizon==horizon)].drop(columns=['location','horizon'])
+            # Filter metrics for location and horizon
+            df_metrics_hl = df_metrics[
+                (df_metrics.location == loc_abbr) & (df_metrics.horizon == horizon)
+            ].drop(columns=['location', 'horizon'])
+            
+            # Pivot metrics and preprocess
             df_metrics_hl = df_metrics_hl.pivot(index='target_date', columns='model', values='value')
-            df_metrics_hl = df_metrics_hl[models]
-            df_metrics_hl = df_metrics_hl.fillna(1e4)
-            df_metrics_hl = np.clip(df_metrics_hl,1,np.inf)
-            df_metrics_hl = df_metrics_hl.apply(lambda row : 1/row, axis = 1)
-            for t in ref_dates[0:(weights_win+horizon)]:   
-                df_weights.append(np.concatenate((np.array([horizon,loc_abbr,t]),np.array([1/len(models)]*len(models)))))
-            for t in ref_dates[(weights_win+horizon):len(ref_dates)]:
-                df_metrics_hlt = df_metrics_hl[(df_metrics_hl.index<t) & (df_metrics_hl.index>=t-pd.Timedelta(weeks=weights_win))]
-                weights = degenerate_em_weights(df_metrics_hlt, models_name=models, tol_stop=1e-4).T
-                df_weights.append(np.concatenate((np.array([horizon,loc_abbr,t]),weights.values[0,:])))
-                  
-    cols = np.concatenate((np.array(['horizon','location','reference_date']),np.array(models)))
-    df_weights = pd.DataFrame(df_weights,columns=cols)
-    return (df_weights)
+            df_metrics_hl = df_metrics_hl[models].fillna(1e4)  # Fill missing values
+
+            for t in ref_dates[: weights_win + horizon]:
+                # For initial time window, assign uniform weights
+                default_weights = np.array([1 / len(models)] * len(models))
+                df_weights.append(
+                    np.concatenate(([horizon, loc_abbr, t], default_weights))
+                )
+
+            for t in ref_dates[weights_win + horizon:]:
+                # Filter historical data for weight calculation
+                df_metrics_hlt = df_metrics_hl[
+                    (df_metrics_hl.index < t)
+                    & (df_metrics_hl.index >= t - pd.Timedelta(weeks=weights_win))
+                ]
+
+                if df_metrics_hlt.empty:
+                    # Assign uniform weights if no data available
+                    weights = np.array([1 / len(models)] * len(models))
+                else:
+                    # Sum rows, compute reciprocal, and normalize
+                    row_vals = df_metrics_hlt**2
+                    row_sums = row_vals.sum(axis=0)
+                    reciprocal_sums = 1 / np.clip(row_sums, 1, np.inf)  # Reciprocal of sums
+                    weights = reciprocal_sums / reciprocal_sums.sum()  # Normalize to sum to 1
+
+                df_weights.append(
+                    np.concatenate(([horizon, loc_abbr, t], weights))
+                )
+
+    # Create final DataFrame
+    cols = ['horizon', 'location', 'reference_date'] + models
+    df_weights = pd.DataFrame(df_weights, columns=cols)
+    return df_weights
 
 
 def generate_weighted_pred_results(results_dict, df_weights, locations, 
@@ -640,28 +472,62 @@ def generate_weighted_pred_results(results_dict, df_weights, locations,
     
     models = list(results_dict.keys())
     df_ensemble = merge_pred_results(results_dict)
-    df_ensemble['value'] = np.round(df_ensemble[models].mean(axis=1),3)
+    df_ensemble['value'] = np.round(df_ensemble[models].mean(axis=1), 3)
+
     ref_dates = df_ensemble['reference_date'].unique()
     horizons = df_ensemble.horizon.unique()
-    for loc_abbr in locations.index:
-        #print("-----------Location: {}-----------".format(loc_abbr))
-        location = locations.loc[loc_abbr].location
-        for horizon in horizons:
-            # print("-----------Horizon: {}-----------".format(horizon))
-            df_ens_hl = df_ensemble[(df_ensemble.location==location) & (df_ensemble.horizon==horizon) & (df_ensemble.output_type=='quantile')]
-            for t in ref_dates:
-                if(average_over_horizons):
-                    weights = df_weights[(df_weights.location==loc_abbr) & (df_weights.reference_date==t)]
-                else:
-                    weights = df_weights[(df_weights.location==loc_abbr) & (df_weights.horizon==horizon) & (df_weights.reference_date==t)]
-                df_ens_hlt = df_ens_hl.loc[df_ens_hl.reference_date==t,models]
-                quantile_vals = [np.sum(df_ens_hlt.iloc[r,:].values*weights[models].values) for r in range(df_ens_hlt.shape[0])]
-                if(np.isnan(quantile_vals).any()==False):
-                    df_ens_hl.loc[df_ens_hl.reference_date==t,'value'] = np.round(quantile_vals,3)
-            df_ensemble.loc[(df_ensemble.location==location) & (df_ensemble.horizon==horizon) & (df_ensemble.output_type=='quantile'),'value'] = df_ens_hl['value']
 
-    df_ensemble = df_ensemble.drop(labels=models,axis=1)
-    df_ensemble.loc[df_ensemble.target=='wk inc flu hosp','value'] = np.round(df_ensemble.loc[df_ensemble.target=='wk inc flu hosp','value'],0)
+    for loc_abbr in locations.index:
+        location = locations.loc[loc_abbr].location
+
+        # Filter the ensemble for the current location
+        df_ens_location = df_ensemble[
+            (df_ensemble.location == location) & (df_ensemble.output_type == 'quantile')
+        ]
+
+        for horizon in horizons:
+            # Filter for the current horizon
+            df_ens_horizon = df_ens_location[df_ens_location.horizon == horizon]
+
+            for t in ref_dates:
+                # Retrieve weights
+                if average_over_horizons:
+                    weights = df_weights[
+                        (df_weights.location == loc_abbr) & (df_weights.reference_date == t)
+                    ]
+                else:
+                    weights = df_weights[
+                        (df_weights.location == loc_abbr)
+                        & (df_weights.horizon == horizon)
+                        & (df_weights.reference_date == t)
+                    ]
+
+                if weights.empty:
+                    continue
+
+                # Filter for the reference date and compute weighted ensemble
+                df_ens_hlt = df_ens_horizon[df_ens_horizon.reference_date == t][models]
+
+                if not df_ens_hlt.empty:
+                    quantile_vals = np.sum(
+                        df_ens_hlt.values * weights[models].values.reshape(1, -1), axis=1
+                    )
+                    df_ensemble.loc[
+                        (df_ensemble.location == location)
+                        & (df_ensemble.horizon == horizon)
+                        & (df_ensemble.reference_date == t)
+                        & (df_ensemble.output_type == 'quantile'),
+                        'value',
+                    ] = np.round(quantile_vals, 3)
+
+    # Drop model columns
+    df_ensemble = df_ensemble.drop(labels=models, axis=1)
+
+    # Round specific target values
+    flu_hosp_mask = df_ensemble.target == 'wk inc flu hosp'
+    df_ensemble.loc[flu_hosp_mask, 'value'] = np.round(df_ensemble.loc[flu_hosp_mask, 'value'], 0)
+
+    df_ensemble['location'] = df_ensemble['location'].astype(str).str.zfill(2)
 
     output_dir = "{}/{}".format(basedir, ensemble_name)
     if not os.path.isdir(output_dir):
@@ -673,6 +539,7 @@ def generate_weighted_pred_results(results_dict, df_weights, locations,
         df_ensemble1.to_csv("{}/{}-CU-{}.csv".format(output_dir,format(ref_date,'%Y-%m-%d'),ensemble_name), index=False) 
 
     return df_ensemble
+
 
 
 def calc_pred_fit_ex(df_pred, df_dat, alpha_vals, pop_size):    
@@ -730,6 +597,7 @@ def calc_and_plot_pred_results_fit(df_results, df_dat, locations, loc_abbr, alph
         df_pred = df_results[df_results.horizon==horizon]
         #(fit_dates, dev_vals, wis_vals, pred_std, pred_bias, dev_rate_vals, wis_rate_vals) = calc_pred_fit_ex(df_pred, df_dat, alpha_vals, pop_size)
         (fit_dates, dev_vals, wis_vals) = calc_pred_fit(df_pred, df_dat, alpha_vals)
+
     
         for j, fit_date in enumerate(fit_dates):
             date = format(fit_date,'%Y-%m-%d')
@@ -772,233 +640,5 @@ def calc_and_plot_pred_results_fit(df_results, df_dat, locations, loc_abbr, alph
     return df_metrics
 
 
-def map_week_to_week_season(week):
-    if week >= 40:  # Weeks 40–52
-        return week - 40
-    else:  # Weeks 1–39
-        return week + 12
-        
-def calculate_historical_stats(df, states, quantiles):
-
-    # Filter data for the given states
-    df = df[df['state'].isin(states)]
-
-    # Get rid of week 53
-    df = df[~(df.week==53)]
-
-    # Define a season starting from week 40
-    df['season'] = df.apply(
-        lambda row: f"{row['year']}-{row['year'] + 1}" if row['week'] >= 40 else f"{row['year'] - 1}-{row['year']}",
-        axis=1
-    )
-    #remove covid seasons
-    exclude_seasons = ['2020-2021','2021-2022']
-    df = df[~df['season'].isin(exclude_seasons)]
-
-    # Calculate mean and quantiles across all years for each state and each week
-    weekly_stats = df.groupby(['state', 'week'])['cases'].agg(
-        mean='mean',
-        **{f"quantile_{int(q * 100)}": lambda x, q=q: x.quantile(q) for q in quantiles}
-    ).reset_index()
-
-    # Group by state and season, find the week of the max value for each season
-    def get_seasonal_max(group):
-        group = group.dropna(subset=['cases'])  # Drop rows where 'cases' is NaN
-        if not group.empty:
-            return group.loc[group['cases'].idxmax()]
-        else:
-            return None  # Return None if the group is empty
-
-    seasonal_max = df.groupby(['state', 'season']).apply(get_seasonal_max).dropna().reset_index(drop=True)
-
-    # Calculate probabilities of the max week for each state
-    peak_week_probabilities = seasonal_max.groupby(['state', 'week']).size().div(
-        seasonal_max.groupby('state').size(), level='state'
-    ).reset_index(name='probability')
-
-    # peek week probabilities combined over all states
-    peak_week_probabilities_combined = seasonal_max.groupby('week').size().div(len(seasonal_max)).reset_index(name='probability')
-    peak_week_probabilities_combined['probability'] /= peak_week_probabilities_combined['probability'].sum()
-        
-    peak_week_probabilities['week_season'] = peak_week_probabilities['week'].apply(map_week_to_week_season)
-    peak_week_probabilities_combined['week_season'] = peak_week_probabilities_combined['week'].apply(map_week_to_week_season)
-    peak_week_probabilities = peak_week_probabilities.sort_values(by='week_season')
-    peak_week_probabilities_combined = peak_week_probabilities_combined.sort_values(by='week_season')
-
-    # Calculate quantiles for the max cases in each season for each state
-    peak_value_quantiles = seasonal_max.groupby('state')['cases'].quantile(quantiles).reset_index()
-    peak_value_quantiles.columns = ['state', 'quantile', 'cases']
-
-    # Return results
-    return {
-        'weekly_stats': weekly_stats,
-        'peak_value_quantiles': peak_value_quantiles,
-        'peak_week_probabilities': peak_week_probabilities, 
-        'peak_week_probabilities_combined': peak_week_probabilities_combined, 
-    }
 
 
-def fit_smooth_distribution_using_kde(probabilities_df, bandwidth=1.0):
-    """
-    Fits a KDE with adjustable bandwidth to the given probabilities.
-
-    Parameters:
-        probabilities_df (pd.DataFrame): DataFrame with columns ['week_season', 'probability'].
-        bandwidth (float): Bandwidth adjustment factor (e.g., <1 for narrower, >1 for wider).
-
-    Returns:
-        pd.DataFrame: DataFrame with columns ['week_season', 'smooth_probability'], where probabilities sum to 1.
-    """
-
-    x = probabilities_df['week_season'].values
-    y = probabilities_df['probability'].values
-
-    # Ensure weights sum to 1 for proper scaling
-    weights = y / np.sum(y)
-
-    # Fit KDE with bandwidth adjustment
-    kde = gaussian_kde(x, weights=weights)
-    kde.set_bandwidth(bw_method=kde.factor * bandwidth)
-
-    # Evaluate KDE at discrete points from 1 to 53
-    x_full = np.arange(1, 54)
-    smooth_probabilities = kde(x_full)
-
-    # Normalize smooth probabilities to sum to 1
-    smooth_probabilities /= np.sum(smooth_probabilities)
-
-    # Return results as a DataFrame
-    return pd.DataFrame({
-        "week_season": x_full,
-        "smooth_probability": smooth_probabilities
-    })
-
-def generate_peak_week_pred(df_his_stats, locations, ref_date, last_date, 
-                            kde_bandwith=0.5, plot_peak_week_prob=False):
-
-    df_peak_week_inc = df_his_stats['peak_value_quantiles'].copy()
-    df_peak_week_prob = df_his_stats['peak_week_probabilities'].copy()
-    df_peak_week_prob_combnined = df_his_stats['peak_week_probabilities_combined'].copy()
-
-    epiweek = date_to_epiweek(ref_date)[1]
-    epiweek_last = date_to_epiweek(last_date)[1]
-    epiweek_season = map_week_to_week_season(epiweek)
-    epiweek_season_last = map_week_to_week_season(epiweek_last)
-
-    locations_abbr = locations.index #pred.components
-    pred_results = []
-
-    # peek week incidence pred
-    for loc_abbr in locations_abbr:
-        location = locations.loc[loc_abbr].location
-        df_peak_week_inc_state = df_peak_week_inc[df_peak_week_inc.state==loc_abbr]
-        quantiles = df_peak_week_inc_state['quantile'].values
-        for quantile in quantiles:
-            pred_results.append([ref_date.strftime("%Y-%m-%d"),'peak inc flu hosp', 'NA','NA',
-                            location, 'quantile', np.round(quantile,3), 
-                            np.round(df_peak_week_inc_state.loc[df_peak_week_inc_state['quantile']==quantile,'cases'].values[0],0)])
-    
-    # peek week prob pred
-    for loc_abbr in locations_abbr:
-        location = locations.loc[loc_abbr].location
-        df_peak_week_prob_state = df_peak_week_prob[df_peak_week_prob.state==loc_abbr]
-        if(df_peak_week_prob_state.shape[0]<5):
-            print(f"Not enough data points for state {loc_abbr} - using combined data")
-            df_peak_week_prob_state = df_peak_week_prob_combnined
-
-        # FIX - what if we are passed the peak?
-        df_peak_week_prob_state.loc[df_peak_week_prob_state.week_season<epiweek_season,'probability'] = 0
-        df_peak_week_prob_state.loc[df_peak_week_prob_state.week_season>epiweek_season_last,'probability'] = 0
-        df_peak_week_prob_state.loc[:,'probability'] = df_peak_week_prob_state.loc[:,'probability']/df_peak_week_prob_state['probability'].sum()
-        probs = fit_smooth_distribution_using_kde(df_peak_week_prob_state, bandwidth=kde_bandwith)
-        probs.loc[probs.week_season<epiweek_season,'smooth_probability'] = 0
-        probs.loc[probs.week_season>epiweek_season_last,'smooth_probability'] = 0
-        probs['smooth_probability'] = probs['smooth_probability']/probs['smooth_probability'].sum()
-        for week in range(epiweek_season,epiweek_season_last+1):
-            week_date = (ref_date+timedelta(weeks=(week-epiweek_season+1))).strftime("%Y-%m-%d")
-            week_prob = probs.loc[probs.week_season==week,'smooth_probability'].values[0]
-            pred_results.append([ref_date.strftime("%Y-%m-%d"),'peak week inc flu hosp', 'NA','NA',
-                            location, 'pmf', week_date, np.round(week_prob,5)])
-            
-        if(plot_peak_week_prob):
-            df_peak_week_prob_state = df_peak_week_prob_state[df_peak_week_prob_state.week_season.isin(range(epiweek_season,epiweek_season_last+1))]
-            probs = probs[probs.week_season.isin(range(epiweek_season,epiweek_season_last+1))]
-            week_dates = [(ref_date + timedelta(weeks=w)).strftime("%Y-%m-%d") for w in range(0,epiweek_season_last-epiweek_season+1)]
-            plt.figure(figsize=(7,3))
-            plt.bar(probs["week_season"], 
-                    probs["smooth_probability"], 
-                    label="Smooth Probabilities", alpha=0.7)
-            plt.scatter(df_peak_week_prob_state['week_season'],
-                        df_peak_week_prob_state['probability'],
-                        color="red", label="Calculated Probabilities")
-            plt.xticks(ticks=range(epiweek_season,epiweek_season_last+1), labels=week_dates,rotation=90)
-            plt.xlabel("")
-            plt.ylabel("Probability")
-            # plt.legend()
-            plt.title(f"Peak week distribution for {loc_abbr}")
-            plt.show()
-
-    df_results = pd.DataFrame(pred_results,columns=['reference_date','target','horizon','target_end_date',
-                                                    'location','output_type','output_type_id','value'])
-    df_results['reference_date'] = pd.to_datetime(df_results['reference_date'], format='%Y-%m-%d')
-    return df_results
-
-
-def save_pred_peak_with_model_pred(df_pred_peak, basedir, model_desc, locations, ref_date):
-    df_pred = load_pred_result_files(basedir, model_desc, locations)
-    df_pred = df_pred[df_pred['reference_date']==ref_date.strftime("%Y-%m-%d")]
-    df_pred = pd.concat([df_pred,df_pred_peak])
-    output_dir = "{}/{}".format(basedir, model_desc)
-    df_pred.to_csv("{}/{}-CU-{}.csv".format(output_dir,format(ref_date,'%Y-%m-%d'),model_desc), index=False) 
-
-
-def degenerate_em_weights(dist_cond_likelihood, init_weights=None, obs_weights=None, models_name=None, tol_stop = 1e-13):
-    """ Degenerate expectation maximization weights.
-        Compute weights to create a posterior distribution averaging over given set of quantiles.
-
-    Args:
-        dist_cond_likelihood (_type_): P_k(wi | hi), k in [1, num_models], i in [1, num_quantiles] [K, Q]
-        init_weights         (_type_): Naive weights.
-        tol_stop             (_type_): _description_. Defaults to 1e-13.
-    """
-
-    # Return number of observations and number of models.
-    num_obs, num_model = dist_cond_likelihood.shape
-    if obs_weights:
-        obs_weights = np.array(obs_weights)
-        obs_weights = obs_weights / np.sum(obs_weights)
-    else:
-        # Initialize all weights equally
-        obs_weights = np.ones(num_obs) * 1/num_obs
-
-    if init_weights:
-        weights = init_weights
-    else:
-        # Initialize all weights equally
-        weights = np.ones((num_obs, num_model)) * 1 / num_model
-
-    lkhds     = weights * dist_cond_likelihood # Likelihoods   | [num_obs, num_models]
-    marg_dist = np.sum(lkhds.to_numpy(), axis=-1) # Marginal dist | [num_obs]
-
-    # Average log likelihood across observation space.
-    log_lklhd     = np.average(np.log(marg_dist), weights=obs_weights)
-    old_log_lklhd = -1000
-
-    while log_lklhd > old_log_lklhd and (log_lklhd-old_log_lklhd >= tol_stop): #or ((log_lklhd - old_log_lklhd) / -log_lklhd >= tol_stop):
-
-        old_log_lklhd  = log_lklhd # Save new log-likelihood value.
-        weights        = np.divide(lkhds, np.expand_dims(marg_dist, -1))
-        weights        = np.average(weights, weights=obs_weights, axis=0) # Recompute weights | [num_models]
-        # Recompute likelihoods
-        lkhds          = weights * dist_cond_likelihood                     # Likelihoods    | [num_obs, num_models]
-        marg_dist      = np.sum(lkhds.to_numpy(), axis=-1)                  # Marginal dist  | [num_obs]
-        log_lklhd      = np.average(np.log(marg_dist), weights=obs_weights) # Log-likelihood | Scalar
-
-    w_df           = pd.DataFrame(columns=["weight", "model_name"])
-    w_df["weight"] = weights
-    if models_name:
-        w_df["model_name"] = models_name
-    else:
-        w_df["model_name"] = [f"model_{str(i)}" for i in range(len(w_df))]
-
-    return w_df.set_index("model_name")
