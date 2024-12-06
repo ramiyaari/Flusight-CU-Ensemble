@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 import epiweeks as ew
 from datetime import timedelta #, datetime, date
 
-
 import requests
 # import warnings
 import os
@@ -104,7 +103,7 @@ def format_hosp_data(filename, states):
                        'Total Influenza Admissions': 'cases',
                        }, inplace=True)
     
-    df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d') #'%m/%d/%Y' ) #'%Y/%m/%d')
+    df['date'] = pd.to_datetime(df['date'], format='%m/%d/%Y' ) #format='%Y-%m-%d') #
     df['cases'] = df['cases'].replace(['NA', 'nan', ''], pd.NA)
     df['cases'] = df['cases'].astype('Int64')
     df['state'] = df['state'].replace('USA', 'US')
@@ -350,19 +349,64 @@ def load_pred_result_files(basedir, model_desc, locations):
 
 
 def fix_change_rate_values(df):
-    
-    # set minimum for rate change values and checks that add up to 1 after rounding
     locations = df.location.unique()
     horizons =  df.horizon.unique()
     for location in locations:
         for horizon in horizons:
             df_ens_hl = df[(df.target=='wk flu hosp rate change') & (df.location==location) & (df.horizon==horizon)]
-            df_ens_hl.loc[:,'value'] = np.clip(df_ens_hl['value'],a_min=0.001,a_max=None)
             df_ens_hl.loc[:,'value'] = df_ens_hl['value']/np.sum(df_ens_hl['value'])
             df_ens_hl.loc[:,'value'] = np.round(df_ens_hl['value'],3)
             df_ens_hl.loc[df_ens_hl.output_type_id=='stable','value'] += np.round(1-np.sum(df_ens_hl['value']),3)
             df.loc[(df.target=='wk flu hosp rate change') & (df.location==location) & (df.horizon==horizon),'value'] = df_ens_hl['value']
     return (df)
+
+def generate_qualtitative_pred(ref_date, location, horizon, samples, ref_val, pop_size):
+
+    # Criteria for qualitative forecasts
+    stable_criteria = [0.3, 0.5, 0.7, 1.0]
+    change_criteria = [1.7, 3.0, 4.0, 5.0]
+
+    num_samples = len(samples)
+
+    cases_change = samples-ref_val
+    rate_changes = cases_change/pop_size*1e5
+    prob_stable = np.sum((np.abs(cases_change) < 10) |
+                            ((rate_changes>-stable_criteria[horizon]) & 
+                            (rate_changes<stable_criteria[horizon])))/num_samples
+    prob_increase = np.sum((rate_changes>=stable_criteria[horizon]) & 
+                            (rate_changes<change_criteria[horizon]))/num_samples
+    prob_large_increase = np.sum(rate_changes>=change_criteria[horizon])/num_samples
+    prob_decrease = np.sum((rate_changes<=-stable_criteria[horizon]) & 
+                            (rate_changes>-change_criteria[horizon]))/num_samples 
+    prob_large_decrease = np.sum(rate_changes<=-change_criteria[horizon])/num_samples
+
+    # set minimum for rate change values and checks that add up to 1 after rounding
+    prob_stable = np.clip(prob_stable,a_min=0.001, a_max=None)
+    prob_increase = np.clip(prob_increase,a_min=0.001, a_max=None)
+    prob_large_increase = np.clip(prob_large_increase,a_min=0.001, a_max=None)
+    prob_decrease = np.clip(prob_decrease,a_min=0.001, a_max=None)
+    prob_large_decrease = np.clip(prob_large_decrease,a_min=0.001, a_max=None)
+    prob_total = prob_stable+prob_increase+prob_large_increase+prob_decrease+prob_large_decrease
+    prob_stable = prob_stable + (1-prob_total)
+
+    pred_results = []
+    pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
+            format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
+            location, 'pmf', 'stable', prob_stable])
+    pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
+            format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
+            location, 'pmf', 'increase', prob_increase])
+    pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
+            format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
+            location, 'pmf', 'large_increase', prob_large_increase])
+    pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
+            format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
+            location, 'pmf', 'decrease', prob_decrease])
+    pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
+            format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
+            location, 'pmf', 'large_decrease', prob_large_decrease])
+    
+    return pred_results
 
 
 def merge_pred_results(results_dict):
@@ -406,7 +450,8 @@ def generate_mean_ensemble_pred_results(results_dict, basedir, ensemble_name):
     return df_ensemble
 
 
-def generate_pred_weights(results_dict, df_metrics, metric, weights_win, locations):
+def generate_pred_weights(results_dict, df_metrics, locations, 
+                          metric='wis', decay_rate=0.5, threshold_precentile=None):
 
     models = list(results_dict.keys())
     ref_dates = results_dict[models[0]]['reference_date'].unique()
@@ -430,34 +475,35 @@ def generate_pred_weights(results_dict, df_metrics, metric, weights_win, locatio
             df_metrics_hl = df_metrics_hl.pivot(index='target_date', columns='model', values='value')
             df_metrics_hl = df_metrics_hl[models].fillna(1e4)  # Fill missing values
 
-            for t in ref_dates[: weights_win + horizon]:
+            for t in ref_dates[:horizon]:
                 # For initial time window, assign uniform weights
                 default_weights = np.array([1 / len(models)] * len(models))
                 df_weights.append(
                     np.concatenate(([horizon, loc_abbr, t], default_weights))
                 )
 
-            for t in ref_dates[weights_win + horizon:]:
+            for t in ref_dates[horizon:]:
                 # Filter historical data for weight calculation
-                df_metrics_hlt = df_metrics_hl[
-                    (df_metrics_hl.index < t)
-                    & (df_metrics_hl.index >= t - pd.Timedelta(weeks=weights_win))
-                ]
+                df_metrics_hlt = df_metrics_hl[df_metrics_hl.index < t]
+                # Multiply by exp_weights to give more weight to recent values
+                exp_weights = np.exp(-decay_rate * np.arange(df_metrics_hlt.shape[0])[::-1])
+                exp_weights /= np.sum(exp_weights)
+                row_vals = df_metrics_hlt * exp_weights[:, np.newaxis]
+                # Sum rows, compute reciprocal, and normalize
+                row_vals = row_vals**2
+                row_sums = row_vals.sum(axis=0)
+                reciprocal_sums = 1 / np.clip(row_sums, 1, np.inf)  # Reciprocal of sums
+                weights = reciprocal_sums / reciprocal_sums.sum()  # Normalize to sum to 1
 
-                if df_metrics_hlt.empty:
-                    # Assign uniform weights if no data available
-                    weights = np.array([1 / len(models)] * len(models))
-                else:
-                    # Sum rows, compute reciprocal, and normalize
-                    row_vals = df_metrics_hlt**2
-                    row_sums = row_vals.sum(axis=0)
-                    reciprocal_sums = 1 / np.clip(row_sums, 1, np.inf)  # Reciprocal of sums
-                    weights = reciprocal_sums / reciprocal_sums.sum()  # Normalize to sum to 1
+                if(threshold_precentile is not None):
+                    threshold = np.percentile(weights,threshold_precentile)
+                    if(sum(weights > threshold)>0):
+                        weights[weights <= threshold] = 0
+                        weights = weights / weights.sum()  # Normalize to sum to 1
 
                 df_weights.append(
                     np.concatenate(([horizon, loc_abbr, t], weights))
                 )
-
     # Create final DataFrame
     cols = ['horizon', 'location', 'reference_date'] + models
     df_weights = pd.DataFrame(df_weights, columns=cols)

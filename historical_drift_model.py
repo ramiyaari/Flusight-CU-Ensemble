@@ -63,10 +63,6 @@ def generate_historical_drift_pred(df, ref_date, weeks_to_predict, locations, qu
     # Extract epiweek of the reference date
     ref_epiweek = date_to_epiweek(ref_date)[1]
 
-    # Criteria for qualitative forecasts
-    stable_criteria = [0.3, 0.5, 0.7, 1.0]
-    change_criteria = [1.7, 3.0, 4.0, 5.0]
-
     pred_results = []
 
     # Loop through each location
@@ -77,7 +73,7 @@ def generate_historical_drift_pred(df, ref_date, weeks_to_predict, locations, qu
 
         location = locations.loc[loc_abbr].location
         pop_size = locations.loc[loc_abbr].population
-        ref_vals = dat_changerate_ref[loc_abbr].values
+        ref_val = dat_changerate_ref[loc_abbr].values[0]
 
         # Historical data for the location
         series = past_data[['year', 'week', loc_abbr]].rename(columns={loc_abbr: 'value'}).dropna()
@@ -111,34 +107,8 @@ def generate_historical_drift_pred(df, ref_date, weeks_to_predict, locations, qu
             # current_samples = np.full(num_samples, np.mean(samples)) # Use the mean of samples as the next value
             current_samples = samples
 
-            cases_change = samples-ref_vals
-            rate_changes = cases_change/pop_size*1e5
-            num_samples = len(rate_changes)
-            prob_stable = np.sum(np.abs(cases_change) < 10 |
-                                 ((rate_changes>-stable_criteria[horizon]) & 
-                                 (rate_changes<stable_criteria[horizon])))/num_samples
-            prob_increase = np.sum((rate_changes>=stable_criteria[horizon]) & 
-                                   (rate_changes<change_criteria[horizon]))/num_samples
-            prob_large_increase = np.sum(rate_changes>=change_criteria[horizon])/num_samples
-            prob_decrease = np.sum((rate_changes<=-stable_criteria[horizon]) & 
-                                   (rate_changes>-change_criteria[horizon]))/num_samples 
-            prob_large_decrease = np.sum(rate_changes<=-change_criteria[horizon])/num_samples
-
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'stable', prob_stable])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'increase', prob_increase])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'large_increase', prob_large_increase])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'decrease', prob_decrease])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'large_decrease', prob_large_decrease])
+            pred_qual = generate_qualtitative_pred(ref_date, location, horizon, samples, ref_val, pop_size)
+            pred_results = pred_results+pred_qual
 
     # df_pred_results = pd.DataFrame(pred_results)
     df_pred_results = pd.DataFrame(pred_results,columns=['reference_date','target','horizon','target_end_date',

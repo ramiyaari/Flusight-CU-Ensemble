@@ -15,6 +15,8 @@ from darts.utils.missing_values import fill_missing_values
 import darts.utils.likelihood_models as Likelihood
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
+from utils import *
+
 import warnings
 import os
 
@@ -298,44 +300,15 @@ def save_darts_pred_results_to_file(pred, ref_date, weeks_to_predict, locations,
                           location, 'quantile', np.round(quantile,3), pred_quantiles.iloc[hind,qind]])
 
 
-    stable_criteria = [0.3, 0.5, 0.7, 1.0]
-    change_criteria = [1.7, 3.0, 4.0, 5.0]
-
     locations_abbr = locations.index #pred.components
     for loc_abbr in locations_abbr:
         location = locations.loc[loc_abbr].location
         pop_size = locations.loc[loc_abbr].population
-        ref_vals = dat_changerate_ref[loc_abbr].values
+        ref_val = dat_changerate_ref[loc_abbr].values[0]
         for horizon in horizons:
             pred_vals = pred[ref_date+timedelta(weeks=horizon)][loc_abbr].all_values()[0][0]
-            cases_change = pred_vals-ref_vals
-            rate_changes = cases_change/pop_size*1e5
-            num_samples = len(rate_changes)
-            prob_stable = np.sum(np.abs(cases_change) < 10 |
-                                 ((rate_changes>-stable_criteria[horizon]) & 
-                                 (rate_changes<stable_criteria[horizon])))/num_samples
-            prob_increase = np.sum((rate_changes>=stable_criteria[horizon]) & 
-                                   (rate_changes<change_criteria[horizon]))/num_samples
-            prob_large_increase = np.sum(rate_changes>=change_criteria[horizon])/num_samples
-            prob_decrease = np.sum((rate_changes<=-stable_criteria[horizon]) & 
-                                   (rate_changes>-change_criteria[horizon]))/num_samples 
-            prob_large_decrease = np.sum(rate_changes<=-change_criteria[horizon])/num_samples
-
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'stable', prob_stable])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'increase', prob_increase])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'large_increase', prob_large_increase])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'decrease', prob_decrease])
-            pred_results.append([format(ref_date,'%Y-%m-%d'),'wk flu hosp rate change', horizon,
-                    format(ref_date + timedelta(weeks=horizon),'%Y-%m-%d'),
-                    location, 'pmf', 'large_decrease', prob_large_decrease])
+            pred_qual = generate_qualtitative_pred(ref_date, location, horizon, pred_vals, ref_val, pop_size)
+            pred_results = pred_results+pred_qual
             
     df_pred_results = pd.DataFrame(pred_results,columns=['reference_date','target','horizon','target_end_date',
                                                          'location','output_type','output_type_id','value']) 
