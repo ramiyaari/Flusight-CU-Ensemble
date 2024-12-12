@@ -239,7 +239,7 @@ def sir_eakf(num_ensembles, N, S_min, S_max, I_min, I_max,
         #     spread_based_var = 0.5 * spread**2
         #     obs_var[t] = 0.2*spread_based_var + 0.8*obs_based_var
 
-        print(f"Week {t}: obs_var={np.mean(obs_var[t]):.4f}")
+        # print(f"Week {t}: obs_var={np.mean(obs_var[t]):.4f}")
 
         # EAKF update
         state_ensembles = np.array([S, I, beta_ensemble, gamma_ensemble])

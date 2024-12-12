@@ -7,12 +7,7 @@ from scipy.stats import gaussian_kde
 from datetime import timedelta 
 from utils import *
 
-def map_week_to_week_season(week):
-    if week >= 40:  # Weeks 40–52
-        return week - 40
-    else:  # Weeks 1–39
-        return week + 12
-    
+   
 
 def calculate_historical_stats(df, states, quantiles, populations):
 
@@ -25,10 +20,8 @@ def calculate_historical_stats(df, states, quantiles, populations):
     df_pop = pd.melt(populations,id_vars=['year'],value_vars=populations.columns[1:],var_name='state',value_name='pop')
 
     # Define a season starting from week 40
-    df['season'] = df.apply(
-        lambda row: f"{row['year']}-{row['year'] + 1}" if row['week'] >= 40 else f"{row['year'] - 1}-{row['year']}",
-        axis=1
-    )
+    df['season'] = df.apply(lambda row: get_season(row['year'], row['week']), axis=1)
+
     #remove covid seasons and current season
     exclude_seasons = ['2020-2021','2021-2022','2024-2025']
     df = df[~df['season'].isin(exclude_seasons)]

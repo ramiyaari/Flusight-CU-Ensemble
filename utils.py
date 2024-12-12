@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import epiweeks as ew
 from datetime import timedelta #, datetime, date
 
+from statsmodels.tsa.seasonal import STL
+
 import requests
 # import warnings
 import os
@@ -25,6 +27,21 @@ def epiweek_to_dates(year, epiweek):
     dates = ew.Week(year, epiweek)
     return dates
 
+def map_week_to_week_season(week):
+    if week >= 40:  # Weeks 40–52
+        return week - 40
+    else:  # Weeks 1–39
+        return week + 12
+    
+def get_season(year, week):
+    """
+    Returns the season string based on the year and week.
+    A season starts from week 40 of a year and extends to week 39 of the next year.
+    """
+    if week >= 40:
+        return f"{year}-{year + 1}"
+    else:
+        return f"{year - 1}-{year}"
 
 def generate_pop_per_week(states, populations):
     years = list(range(min(populations['year']),max(populations['year'])))
@@ -44,6 +61,71 @@ def generate_pop_per_week(states, populations):
             df_pop.loc[row_ind,state] = pop_weekly[:-1]
     df_pop = df_pop.astype(np.double)
     return (df_pop)
+
+
+def get_peak_dates_per_state(df, states):
+    df = df.copy()
+    df['season'] = df.apply(lambda row: get_season(row['year'], row['week']), axis=1)
+    df_peak_idx = df.loc[:,['season']+states.tolist()].groupby(['season']).idxmax()
+    df_peak_idx = df_peak_idx[~df_peak_idx.index.isin(['2019-2020','2024-2025'])]
+    peak_dates = {}
+    for state in states:
+        peak_dates[state] = df.loc[df_peak_idx[state],'date'].values
+    return peak_dates
+
+
+def fix_ts_outliers(ts, peak_dates, thresh_z_score=5, smooth_window=3):
+    outlier_dates = []
+    tss = ts.rolling(window=smooth_window,center=True).mean()
+    resid = ts-tss
+    z_scores = (resid - resid.mean())/resid.std()
+    max_z_score = np.max(z_scores)
+    if(max_z_score > thresh_z_score):
+        max_ind = np.where((z_scores == max_z_score) & ~pd.isna(z_scores))[0][0]
+        max_date = ts.index[max_ind]
+        if(max_date not in (peak_dates)):
+            outlier_dates.append(max_date)
+            ts = ts.copy()
+            if((max_ind>0) & max_ind<len(ts)):
+                ts.iloc[max_ind] = int((ts.iloc[max_ind-1]+ts.iloc[max_ind+1])/2)
+            elif(max_ind==0):
+                ts.iloc[max_ind] = ts.iloc[max_ind+1]
+            else:
+                ts.iloc[max_ind] = ts.iloc[max_ind-1]
+            ts, outlier_dates2 = fix_ts_outliers(ts, peak_dates, thresh_z_score, smooth_window)
+            outlier_dates = outlier_dates + outlier_dates2
+    return (ts,outlier_dates)
+
+
+# def fix_ts_outliers_periodic(ts, thresh_z_score=5, period=52):
+
+#     ts = ts.astype(float)
+
+#     # Step 1: Decompose the time series
+#     stl = STL(ts, period=period, robust=True)
+#     decomposition = stl.fit()
+#     trend = decomposition.trend
+#     seasonal = decomposition.seasonal
+#     resid = decomposition.resid
+
+#     # Step 2: Compute z-scores for the residuals
+#     z_scores = (resid - resid.mean()) / resid.std()
+
+#     # Find outlier indices
+#     outlier_indices = np.where(np.abs(z_scores) > thresh_z_score)[0]
+#     outlier_dates = ts.index[outlier_indices]
+
+#     # Step 3: Fix outliers
+#     ts_fixed = ts.copy()
+#     for ind in outlier_indices:
+#         if 0 < ind < len(ts) - 1:
+#             # Replace with the mean of neighboring points
+#             ts_fixed.iloc[ind] = (ts.iloc[ind - 1] + ts.iloc[ind + 1]) / 2
+#         elif ind == 0:
+#             ts_fixed.iloc[ind] = ts.iloc[ind + 1]
+#         else:  # Last point
+#             ts_fixed.iloc[ind] = ts.iloc[ind - 1]
+#     return ts_fixed, list(outlier_dates)
 
 
 def format_hosp_data_2024(filename, states):
@@ -97,33 +179,45 @@ def format_hosp_data(filename, states):
     df = df.fillna('NA')
 
     # select and format required columns
-    df = df[['Week Ending Date', 'Geographic aggregation', 'Total Influenza Admissions']]
+    df = df[['Week Ending Date', 'Geographic aggregation', 
+             'Total Influenza Admissions', 'Number Hospitals Reporting Influenza Admissions']]
     df.rename(columns={'Week Ending Date' : 'date',
                        'Geographic aggregation': 'state',
                        'Total Influenza Admissions': 'cases',
+                       'Number Hospitals Reporting Influenza Admissions': 'reporting'
+
                        }, inplace=True)
     
     df['date'] = pd.to_datetime(df['date'], format='%m/%d/%Y' ) #format='%Y-%m-%d') #
     df['cases'] = df['cases'].replace(['NA', 'nan', ''], pd.NA)
     df['cases'] = df['cases'].astype('Int64')
+    df['reporting'] = df['reporting'].replace(['NA', 'nan', ''], pd.NA)
+    df['reporting'] = df['reporting'].astype('Int64')
     df['state'] = df['state'].replace('USA', 'US')
     df = df[(df['state'] != 'AS')]
 
-    dat_wide = df.pivot(index='date', columns='state', values='cases')
+    dat_wide_cases = df.pivot(index='date', columns='state', values='cases')
+    dat_wide_reporting = df.pivot(index='date', columns='state', values='reporting')
 
     # Resample weekly (ending on Saturday) and sum
-    dat_weekly = dat_wide.resample('W-SAT').sum()
+    dat_weekly_cases = dat_wide_cases.resample('W-SAT').sum()
+    dat_weekly_reporting = dat_wide_reporting.resample('W-SAT').sum()
 
     # Reset index and finalize the weekly data frame
-    dat_weekly_wide = dat_weekly.reset_index()
+    dat_weekly_cases = dat_weekly_cases.reset_index()
+    dat_weekly_reporting = dat_weekly_reporting.reset_index()
 
     # Add epidemiological week info
-    dat_weekly_wide['year'] = dat_weekly_wide['date'].apply(lambda d: date_to_epiweek(d)[0])
-    dat_weekly_wide['week'] = dat_weekly_wide['date'].apply(lambda d: date_to_epiweek(d)[1])
+    dat_weekly_cases['year'] = dat_weekly_cases['date'].apply(lambda d: date_to_epiweek(d)[0])
+    dat_weekly_cases['week'] = dat_weekly_cases['date'].apply(lambda d: date_to_epiweek(d)[1])
+    dat_weekly_reporting['year'] = dat_weekly_reporting['date'].apply(lambda d: date_to_epiweek(d)[0])
+    dat_weekly_reporting['week'] = dat_weekly_reporting['date'].apply(lambda d: date_to_epiweek(d)[1])
 
     # Filter the weekly data to include only the selected states
-    dat_weekly_wide = dat_weekly_wide[['date', 'year', 'week'] + states.tolist()]
-    return dat_weekly_wide
+    dat_weekly_cases = dat_weekly_cases[['date', 'year', 'week'] + states.tolist()]
+    dat_weekly_reporting = dat_weekly_reporting[['date', 'year', 'week'] + states.tolist()]
+
+    return dat_weekly_cases, dat_weekly_reporting
 
 
 
@@ -176,9 +270,14 @@ def fetch_ili_data(regions, epiweek_range):
         return pd.DataFrame()  # Return empty DataFrame on request failure
     
 
-def read_hosp_incidence_data(data_dir, epiyear, epiweek, states, new_format=True, download=True, plot=True):
+def read_hosp_incidence_data(data_dir, epiyear, epiweek, states, 
+                             new_format=True, download=True, 
+                             fix_partial_reporting=False,
+                             fix_outliers=False, 
+                             plot=False):
     
     hosp_data_fname = data_dir + "hosp_cases_{}_{}.csv".format(epiyear,epiweek)
+    df_reports = None
     if(not os.path.exists(hosp_data_fname)):
         if(new_format): #2024-2025 format
             filename = 'Weekly_Hospital_Respiratory_Data__HRD__Metrics_by_Jurisdiction__National_Healthcare_Safety_Network__NHSN.csv'
@@ -192,19 +291,58 @@ def read_hosp_incidence_data(data_dir, epiyear, epiweek, states, new_format=True
             df = df.fillna('NA')
             df.to_csv(hosp_rates_file, index=False)
         if(new_format):
-            df_hosp = format_hosp_data(hosp_rates_file, states)
+            df_hosp, df_reports = format_hosp_data(hosp_rates_file, states)
         else:
             df_hosp = format_hosp_data_2024(hosp_rates_file, states)
+
         max_date = df_hosp['date'].max()
         cut_date = pd.Timestamp(epiweek_to_dates(epiyear, epiweek).enddate())
         if(max_date > cut_date):
             print("Max date {} is larger than the cut date {} - data will be truncated".format(max_date,cut_date))
             df_hosp = df_hosp[df_hosp['date']<=cut_date]
+            if(df_reports is not None):
+                df_reports = df_reports[df_reports['date']<=cut_date]
+
+        if(fix_partial_reporting or fix_outliers):
+            hosp_data_org_fname = data_dir + "hosp_cases_{}_{}_original.csv".format(epiyear,epiweek)
+            df_hosp_org = df_hosp.copy()
+            df_hosp_org.to_csv(hosp_data_org_fname,index=False)
+
+        if((df_reports is not None) and fix_partial_reporting) :
+            columns_to_process = df_reports.iloc[:, 3:]
+            columns_to_process = columns_to_process.astype(float)
+            normalized_columns = columns_to_process.apply(lambda x: x / x.max(), axis=0)
+            normalized_columns = normalized_columns.replace(0, 1)
+            df_reports_norm = pd.concat([df_reports.iloc[:, :3], normalized_columns], axis=1)
+            df_hosp.iloc[:, 3:] = (df_hosp.iloc[:, 3:]/df_reports_norm.iloc[:,3:]).astype('Int64')
+            
+        if(fix_outliers):
+            peak_dates = get_peak_dates_per_state(df_hosp, states)
+            for state in states:
+                df_hosp_state = df_hosp[state]
+                df_hosp_state.index = df_hosp['date']
+                df_hosp_state_fixed, _ = fix_ts_outliers(df_hosp_state, peak_dates[state])
+                df_hosp[state] = df_hosp_state_fixed.values
+
+        if(plot and (fix_partial_reporting or fix_outliers)):
+            for state in states:
+                plt.figure(figsize=(6,3))
+                plt.plot(df_hosp_org['date'],df_hosp_org[state],label='original')
+                plt.plot(df_hosp['date'],df_hosp[state],label='fixed')
+                plt.legend()
+                plt.title(state)
+
         df_hosp.to_csv(hosp_data_fname,index=False)
+        if(df_reports is not None):
+            hosp_reports_fname = data_dir + "hosp_reports_{}_{}.csv".format(epiyear,epiweek)
+            df_reports.to_csv(hosp_reports_fname,index=False)
     else:
         df_hosp = pd.read_csv(hosp_data_fname)
 
-    df_hosp['date'] = pd.to_datetime(df_hosp['date'], format='%Y-%m-%d') #format='%m/%d/%Y') #        
+    df_hosp['date'] = pd.to_datetime(df_hosp['date'], format='%Y-%m-%d') #format='%m/%d/%Y') #    
+    if(df_reports is not None):    
+        df_reports['date'] = pd.to_datetime(df_reports['date'], format='%Y-%m-%d') #format='%m/%d/%Y') #        
+
     if(plot):
         df_hosp_long = pd.melt(df_hosp,id_vars=['date','year','week'],value_vars=df_hosp.columns[3:],var_name='state',value_name='hosp cases')
         g = sns.FacetGrid(df_hosp_long, col="state", col_wrap=5, hue="state", sharey=False, sharex=True, height=3, aspect=1.33)
@@ -280,7 +418,7 @@ def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, smooth=
                 ratio = None
                 max_hosp = df_hosp[(df_hosp['year'] == year)][state].max()
                 max_ili = df_ili[(df_ili['year'] == year)][state].max()
-                if (not np.isnan(max_hosp)) and (not np.isnan(max_ili)) and (max_ili>0):
+                if not pd.isna(max_hosp) and not pd.isna(max_ili) and max_ili > 0:
                     ratio = max_hosp / max_ili
                 state_ratios.append(ratio)
             valid_ratios = [r for r in state_ratios if r is not None and np.isfinite(r)]
@@ -302,6 +440,24 @@ def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, smooth=
     return (df_ili)
 
 
+def read_AH(data_dir):
+    AH_fname = data_dir +"AH.csv"
+    AH_daily = pd.read_csv(AH_fname)
+    df_AH = AH_daily.copy()
+    df_AH.index = pd.date_range(start='2024-01-01', periods=365, freq='D')
+    df_AH = df_AH.resample('W-SAT').sum()
+    df_AH = df_AH.iloc[:-1,:]
+    df_AH.reset_index(inplace=True)
+    df_AH.rename(columns={'index': 'date'}, inplace=True)
+    start_date = pd.Timestamp('2010-01-02') 
+    end_date = pd.Timestamp('2025-05-31')  
+    all_dates = pd.date_range(start=start_date, end=end_date, freq='W-SAT')
+    n_duplicates = len(all_dates) // len(df_AH) + 1
+    df_AH = pd.concat([df_AH] * n_duplicates, ignore_index=True)
+    df_AH = df_AH.iloc[:len(all_dates)]
+    df_AH['date'] = all_dates
+    df_AH = df_AH[['date'] + [col for col in df_AH.columns if col != 'date']]
+    return (AH_daily, df_AH)
 
 def calculate_wis(truth, df_pred, alpha_vals):
     wis_vals = 0
