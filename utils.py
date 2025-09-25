@@ -29,9 +29,9 @@ def epiweek_to_dates(year, epiweek):
 
 def map_week_to_week_season(week):
     if week >= 40:  # Weeks 40–52
-        return week - 40
+        return week - 39 #week - 40
     else:  # Weeks 1–39
-        return week + 12
+        return week + 13 #week + 12
     
 def get_season(year, week):
     """
@@ -188,7 +188,10 @@ def format_hosp_data(filename, states):
 
                        }, inplace=True)
     
-    df['date'] = pd.to_datetime(df['date'], format='%m/%d/%Y' ) #format='%Y-%m-%d') #
+    try:
+        df['date'] = pd.to_datetime(df['date'], format='%m/%d/%Y')
+    except ValueError:
+        df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d')
     df['cases'] = df['cases'].replace(['NA', 'nan', ''], pd.NA)
     df['cases'] = df['cases'].astype('Int64')
     df['reporting'] = df['reporting'].replace(['NA', 'nan', ''], pd.NA)
@@ -840,6 +843,81 @@ def calc_and_plot_pred_results_fit(df_results, df_dat, locations, loc_abbr, alph
         plt.savefig(output_dir +"/" + loc_abbr + ".png", format="png", bbox_inches="tight", dpi=300)
 
     return df_metrics
+
+def plot_pred_results_fit(df_results, df_dat, locations, loc_abbr, basedir, model_desc):
+
+    location = locations.loc[loc_abbr].location
+
+    df_results = df_results[(df_results.target=='wk inc flu hosp') & (df_results.location==location)]
+    df_results = df_results.rename(columns={'target_end_date':'date', 'output_type_id':'quantile'})
+    df_results = df_results.astype({"quantile": float})
+    ref_dates = df_results['reference_date'].unique()
+
+    df_dat = df_dat.loc[:,['date',loc_abbr]].rename(columns={loc_abbr:'value'})
+    df_dat = df_dat[df_dat.date.isin(df_results.date)]
+    if(df_dat.empty):
+        return None
+
+    plt.figure(figsize=(6, 3))
+    for ref_date in ref_dates:
+        df_ref = df_results[df_results['reference_date']==ref_date]
+        fit_dates = df_ref['date'].unique()
+        pred_vals = df_ref.loc[df_ref['quantile']==0.5,'value'].values
+        plt.plot(fit_dates, pred_vals, label="pred", color='blue', alpha=0.5)
+        plt.fill_between(fit_dates,
+                         df_ref.loc[df_ref['quantile']==0.25,'value'].values,
+                         df_ref.loc[df_ref['quantile']==0.75,'value'].values,
+                         color='blue', alpha=0.1)
+
+    plt.plot(df_dat['date'],df_dat['value'])
+    plt.xticks(rotation=90)        
+    plt.ylabel('hosp cases')
+    plt.title('State = ' + loc_abbr)
+    
+    output_dir = "{}/{}/{}".format(basedir, model_desc, '_plots')
+    if not os.path.isdir(output_dir):
+        os.makedirs(output_dir)
+    plt.savefig(output_dir +"/" +loc_abbr + ".png", format="png", bbox_inches="tight", dpi=300)
+
+
+def plot_pred_results_fit2(df_results, df_dat, locations, loc_abbr, basedir, model_desc):
+
+    location = locations.loc[loc_abbr].location
+
+    df_results = df_results[(df_results.target=='wk inc flu hosp') & (df_results.location==location)]
+    df_results = df_results.rename(columns={'target_end_date':'date', 'output_type_id':'quantile'})
+    df_results = df_results.astype({"quantile": float})
+    ref_dates = df_results['reference_date'].unique()
+
+    df_dat = df_dat.loc[:,['date',loc_abbr]].rename(columns={loc_abbr:'value'})
+    df_dat = df_dat[df_dat.date.isin(df_results.date)]
+    if(df_dat.empty):
+        return None
+    
+    ref_date = ref_dates.max()
+    plt.figure(figsize=(6, 3))
+    df_ref = df_results[df_results['reference_date']==ref_date]
+    fit_dates = df_ref['date'].unique()
+    pred_vals = df_ref.loc[df_ref['quantile']==0.5,'value'].values
+    plt.plot(fit_dates, pred_vals, label="pred", color='blue', alpha=1)
+    plt.fill_between(fit_dates,
+                        df_ref.loc[df_ref['quantile']==0.25,'value'].values,
+                        df_ref.loc[df_ref['quantile']==0.75,'value'].values,
+                        color='blue', alpha=0.5)
+    plt.fill_between(fit_dates,
+                        df_ref.loc[df_ref['quantile']==0.025,'value'].values,
+                        df_ref.loc[df_ref['quantile']==0.975,'value'].values,
+                        color='blue', alpha=0.25)
+    plt.plot(df_dat['date'],df_dat['value'])
+    plt.xticks(rotation=90)        
+    plt.ylabel('hosp cases')
+    plt.title('State = ' + loc_abbr)
+    
+    output_dir = "{}/{}/{}".format(basedir, model_desc, format(ref_date,'%Y-%m-%d'))
+    if not os.path.isdir(output_dir):
+        os.makedirs(output_dir)
+    plt.savefig(output_dir +"/" +loc_abbr + ".png", format="png", bbox_inches="tight", dpi=300)
+
 
 
 

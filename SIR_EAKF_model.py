@@ -65,17 +65,25 @@ def remove_outliers(ensemble, threshold_factor=4):
 
 # SIR model equations
 def sir_step(S, I, beta, gamma, N):
-    new_infected = beta * S * I / N
-    new_recovered = gamma * I
+    """
+    Deterministic RK4 SIR step.
+    """
+    def rhs(S_, I_):
+        Einf     = np.clip(beta * S_ * I_ / N, 0.0, S_)
+        Erecov   = np.clip(I_ * gamma, 0.0, I_)
+        dS = - Einf
+        dI = Einf - Erecov
+        return dS, dI, Einf
 
-    S_next = S - new_infected
-    I_next = I + new_infected - new_recovered
+    s1, i1, i1i = rhs(S,            I)
+    s2, i2, i2i = rhs(S + s1/2.0,   I + i1/2.0)
+    s3, i3, i3i = rhs(S + s2/2.0,   I + i2/2.0)
+    s4, i4, i4i = rhs(S + s3,       I + i3)
 
-    # Ensure no negative values
-    S_next = np.maximum(S_next, 0)
-    I_next = np.maximum(I_next, 0)
-
-    return S_next, I_next, new_infected
+    S += (s1 + 2*s2 + 2*s3 + s4) / 6.0
+    I += (i1 + 2*i2 + 2*i3 + i4) / 6.0
+    new_infected = (i1i + 2*i2i + 2*i3i + i4i) / 6.0
+    return S, I, new_infected 
 
 
 def eakf_update(state_ensembles, obs_ensemble, obs_truth, obs_var,
@@ -148,13 +156,13 @@ def eakf_update(state_ensembles, obs_ensemble, obs_truth, obs_var,
             upper_bound = max_values[i]
             ensemble = updated_state_ensembles[i, :]
 
-            # Identify out-of-bound values
-            out_of_bounds = (ensemble < lower_bound) | (ensemble > upper_bound)
-            if np.any(out_of_bounds):
-                # Replace out-of-bound values with the mean
-                ensemble[out_of_bounds] = np.mean(ensemble)
+            # # Identify out-of-bound values
+            #out_of_bounds = (ensemble < lower_bound) | (ensemble > upper_bound)
+            #if np.any(out_of_bounds):
+            #    # Replace out-of-bound values with the mean
+            #    ensemble[out_of_bounds] = np.mean(ensemble)
 
-            ensemble = remove_outliers(ensemble)
+            # ensemble = remove_outliers(ensemble)
             ensemble = np.clip(ensemble,lower_bound,upper_bound)
             updated_state_ensembles[i, :] = ensemble
 
@@ -216,6 +224,8 @@ def sir_eakf(num_ensembles, N, S_min, S_max, I_min, I_max,
 
     # Track weekly infections over time
     weekly_I = np.zeros((obs_len + weeks_to_predict, num_ensembles))
+    weekly_I_obs = np.zeros((obs_len + weeks_to_predict, num_ensembles))
+    # print(f"Week 0: beta_mean={np.mean(beta_ensemble):.4f}, beta_std={np.std(beta_ensemble):.4f}, gamma_mean={np.mean(gamma_ensemble):.4f}, gamma_std={np.std(gamma_ensemble):.4f}")
 
     # Assimilate observed data
     for t in range(obs_len):
@@ -228,8 +238,8 @@ def sir_eakf(num_ensembles, N, S_min, S_max, I_min, I_max,
             # Accumulate weekly infections
             weekly_I[t, :] += new_infected
 
-        # weekly_I_obs = weekly_I[t, :]*reporting_factor
-        weekly_I_obs = np.random.binomial(weekly_I.astype(int), reporting_factor)
+        # weekly_I_obs[t, :] = weekly_I[t, :]*reporting_factor
+        weekly_I_obs[t, :] = np.random.binomial(weekly_I[t, :].astype(int), reporting_factor)
 
         # if(t>5):
         #     weekly_I_mean = np.mean(weekly_I_obs, axis=1)

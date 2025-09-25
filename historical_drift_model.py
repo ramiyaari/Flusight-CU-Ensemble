@@ -13,7 +13,7 @@ def get_epiweek_window(current_epiweek, epiweek_window):
     Generate a list of epiweeks in the window around the current epiweek.
     """
     max_weeks = 52  # Maximum number of epiweeks in a year
-    return [(current_epiweek + offset - 1) % max_weeks + 1 for offset in range(-epiweek_window, epiweek_window + 1)]
+    return [(current_epiweek + offset - 1) % max_weeks + 1 for offset in range(-(epiweek_window+1), epiweek_window + 1)]
 
 
 def estimate_seasonal_drift_and_noise(data, current_epiweek, epiweek_window=0):
@@ -34,6 +34,17 @@ def estimate_seasonal_drift_and_noise(data, current_epiweek, epiweek_window=0):
     # Calculate first differences (drift) by year
     relevant_data['diff'] = relevant_data.groupby('year')['value'].diff()
 
+    # Fix 'diff' for <week=1, year=x+1> and <week=52, year=x>
+    for year in relevant_data['year'].unique():
+        if year - 1 in relevant_data['year'].values:  # Check if the previous year exists
+            week_1_idx = relevant_data[(relevant_data['year'] == year) & (relevant_data['week'] == 1)].index
+            week_52_idx = relevant_data[(relevant_data['year'] == year - 1) & (relevant_data['week'] == 52)].index
+            if len(week_1_idx) > 0 and len(week_52_idx) > 0:  # Ensure both weeks exist
+                relevant_data.loc[week_1_idx, 'diff'] = (
+                    relevant_data.loc[week_1_idx, 'value'].values[0] -
+                    relevant_data.loc[week_52_idx, 'value'].values[0]
+                )
+                
     # Mean drift
     mean_drift = relevant_data['diff'].mean()
 
@@ -51,7 +62,8 @@ def estimate_seasonal_drift_and_noise(data, current_epiweek, epiweek_window=0):
 
 
 def generate_historical_drift_pred(df, ref_date, weeks_to_predict, locations, quantiles, num_samples, epiweek_window, 
-                                   dat_changerate_ref, basedir, model_desc='historical_drift'):
+                                   dat_changerate_ref, basedir, model_desc='historical_drift',
+                                   generate_qual_pred=True):
 
     # Ensure dates are datetime
     df['date'] = pd.to_datetime(df['date'])
@@ -78,9 +90,6 @@ def generate_historical_drift_pred(df, ref_date, weeks_to_predict, locations, qu
         # Historical data for the location
         series = past_data[['year', 'week', loc_abbr]].rename(columns={loc_abbr: 'value'}).dropna()
 
-        # Estimate seasonal drift and residual-based noise
-        mean_drift, std_drift, residuals = estimate_seasonal_drift_and_noise(series, ref_epiweek, epiweek_window=epiweek_window)
-
         # Get the last observed value
         last_value = series['value'].iloc[-1]
 
@@ -90,6 +99,12 @@ def generate_historical_drift_pred(df, ref_date, weeks_to_predict, locations, qu
         # Monte Carlo sampling for predictions
         for horizon in range(weeks_to_predict):
             target_date = ref_date + timedelta(weeks=horizon)
+
+            target_epiweek = date_to_epiweek(target_date)[1]
+
+            # Estimate seasonal drift and residual-based noise
+            mean_drift, std_drift, residuals = estimate_seasonal_drift_and_noise(series, target_epiweek, epiweek_window=epiweek_window)
+
             samples = []
             for sample in current_samples:
                 stochastic_drift = np.random.normal(loc=mean_drift, scale=std_drift)
@@ -107,16 +122,18 @@ def generate_historical_drift_pred(df, ref_date, weeks_to_predict, locations, qu
             # current_samples = np.full(num_samples, np.mean(samples)) # Use the mean of samples as the next value
             current_samples = samples
 
-            pred_qual = generate_qualtitative_pred(ref_date, location, horizon, samples, ref_val, pop_size)
-            pred_results = pred_results+pred_qual
+            if(generate_qual_pred):
+                pred_qual = generate_qualtitative_pred(ref_date, location, horizon, samples, ref_val, pop_size)
+                pred_results = pred_results+pred_qual
 
     # df_pred_results = pd.DataFrame(pred_results)
     df_pred_results = pd.DataFrame(pred_results,columns=['reference_date','target','horizon','target_end_date',
                                                          'location','output_type','output_type_id','value']) 
 
-    target_order = ['wk inc flu hosp', 'wk flu hosp rate change']
-    df_pred_results['target'] = pd.Categorical(df_pred_results['target'], categories=target_order, ordered=True)
-    df_pred_results = df_pred_results.sort_values(by=['target', 'location','horizon'])
+    if(generate_qual_pred):
+        target_order = ['wk inc flu hosp', 'wk flu hosp rate change']
+        df_pred_results['target'] = pd.Categorical(df_pred_results['target'], categories=target_order, ordered=True)
+        df_pred_results = df_pred_results.sort_values(by=['target', 'location','horizon'])
 
     df_pred_results['location'] = df_pred_results['location'].astype(str).str.zfill(2)
 
