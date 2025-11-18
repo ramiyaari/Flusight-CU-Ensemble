@@ -1,8 +1,245 @@
 import numpy as np
 import pandas as pd
 # from scipy.stats import norm
+import matplotlib.pyplot as plt
 
 from utils import *
+
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def plot_means_vars_cv_from_df(df: pd.DataFrame, state_names, location, out_dir="."):
+    work = df.copy()
+    eps = 1e-12
+
+    # Build long tidy table
+    long_rows = []
+    for p in state_names:
+        mcol = f"{p}_post_mean"
+        prior_col = f"{p}_prior_var"
+        post2_col = f"{p}_post2_var"
+
+        m = pd.to_numeric(work[mcol], errors="coerce") if mcol in work.columns else pd.Series([np.nan]*len(work))
+        prior = pd.to_numeric(work[prior_col], errors="coerce") if prior_col in work.columns else pd.Series([np.nan]*len(work))
+        post2 = pd.to_numeric(work[post2_col], errors="coerce") if post2_col in work.columns else pd.Series([np.nan]*len(work))
+
+        sd = np.sqrt(np.clip(post2.values, a_min=0, a_max=None))
+        cv = sd / np.maximum(np.abs(m.values), eps)
+
+        long_rows.append(pd.DataFrame({
+            "time": work["time"],
+            "variable": p,
+            "mean": m,
+            "prior_variance": prior,
+            "post_variance": post2,          
+            "cv": cv
+        }))
+
+    long_df = (pd.concat(long_rows, ignore_index=True)
+               if long_rows else pd.DataFrame(columns=["time","variable","mean","prior_variance","post_variance","cv"]))
+    long_df = long_df.sort_values("time").reset_index(drop=True)
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    def _figsize(nvars):
+        # a little auto-scaling so labels don't cram
+        return (10, max(4, 2.4 * nvars))
+
+    def _get_axes(nvars, *, sharey=False):
+        fig, axes = plt.subplots(nvars, 1, sharex=True, sharey=sharey, figsize=_figsize(nvars))
+        # Normalize axes to an array
+        if nvars == 1:
+            axes = np.array([axes])
+        return fig, axes
+
+    # Mean
+    def _plot_mean():
+        if long_df.empty: return None
+        vars_sorted = sorted(long_df["variable"].unique())
+        nvars = len(vars_sorted)
+        fig, axes = _get_axes(nvars)
+        for idx, var in enumerate(vars_sorted):
+            ax = axes[idx]
+            sub = long_df[long_df["variable"] == var]
+            ax.plot(sub["time"], sub["mean"])
+            ax.set_title(var)
+            ax.set_ylabel("Mean")
+            if idx == nvars - 1:
+                ax.set_xlabel("week")
+            ax.grid(True, alpha=0.25)
+        fig.tight_layout()
+        out_path = os.path.join(out_dir, f"vars_mean_{location}.png")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return out_path
+
+    # Variance
+    def _plot_variance_prior_post():
+        if long_df.empty: return None
+        vars_sorted = sorted(long_df["variable"].unique())
+        nvars = len(vars_sorted)
+        fig, axes = _get_axes(nvars, sharey=False)
+        for idx, var in enumerate(vars_sorted):
+            ax = axes[idx]
+            sub = long_df[long_df["variable"] == var]
+            ax.plot(sub["time"], sub["prior_variance"], label="prior_var")
+            ax.plot(sub["time"], sub["post_variance"], label="posterior_var")
+            ax.set_title(var)
+            ax.set_ylabel("Variance")
+            if idx == nvars - 1:
+                ax.set_xlabel("week")
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="upper right", fontsize=8)
+        fig.tight_layout()
+        out_path = os.path.join(out_dir, f"vars_var_{location}.png")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return out_path
+
+    # CV
+    def _plot_cv():
+        if long_df.empty: return None
+        vars_sorted = sorted(long_df["variable"].unique())
+        nvars = len(vars_sorted)
+        fig, axes = _get_axes(nvars)
+        for idx, var in enumerate(vars_sorted):
+            ax = axes[idx]
+            sub = long_df[long_df["variable"] == var]
+            ax.plot(sub["time"], sub["cv"])
+            ax.set_title(var)
+            ax.set_ylabel("Coefficient of Variation")
+            if idx == nvars - 1:
+                ax.set_xlabel("week")
+            ax.grid(True, alpha=0.25)
+        fig.tight_layout()
+        out_path = os.path.join(out_dir, f"vars_cv_{location}.png")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return out_path
+
+    _plot_mean()
+    _plot_variance_prior_post()  
+    _plot_cv()
+
+# def plot_means_vars_cv_from_df(df: pd.DataFrame, state_names, location, out_dir="."):
+    
+#     work = df.copy()
+#     eps = 1e-12
+
+#     # Build long tidy table
+#     long_rows = []
+#     for p in state_names:
+#         mcol = f"{p}_post_mean"
+#         vcol = f"{p}_post2_var"
+#         m = pd.to_numeric(work[mcol], errors="coerce") if mcol in work.columns else pd.Series([np.nan]*len(work))
+#         v = pd.to_numeric(work[vcol], errors="coerce") if vcol in work.columns else pd.Series([np.nan]*len(work))
+#         sd = np.sqrt(np.clip(v.values, a_min=0, a_max=None))
+#         cv = sd / np.maximum(np.abs(m.values), eps)
+#         long_rows.append(pd.DataFrame({
+#             "time": work["time"],
+#             "variable": p,
+#             "mean": m,
+#             "variance": v,
+#             "cv": cv
+#         }))
+#     long_df = (pd.concat(long_rows, ignore_index=True)
+#                if long_rows else pd.DataFrame(columns=["time","variable","mean","variance","cv"]))
+#     long_df = long_df.sort_values("time").reset_index(drop=True)
+
+#     os.makedirs(out_dir, exist_ok=True)
+
+#     def _plot(metric_col: str, ylabel: str, filename: str):
+#         if long_df.empty:
+#             return None
+#         vars_sorted = sorted(long_df["variable"].unique())
+#         nvars = len(vars_sorted)
+#         if nvars == 0:
+#             return None
+
+#         fig, axes = plt.subplots(nvars, 1, sharex=True, sharey=False, figsize=(10, 10))
+#         for idx, var in enumerate(vars_sorted):
+#             ax = axes[idx]
+#             sub = long_df[long_df["variable"] == var]
+#             ax.plot(sub["time"], sub[metric_col])
+#             ax.set_title(var)
+#             ax.set_ylabel(ylabel)
+#             if idx == nvars - 1:
+#                 ax.set_xlabel("week")
+#             # light grid helps read-off
+#             ax.grid(True, alpha=0.25)
+
+#         fig.tight_layout()
+#         out_path = os.path.join(out_dir, filename)
+#         fig.savefig(out_path, dpi=150)
+#         plt.close(fig)
+#         return out_path
+
+#     _plot("mean", "Mean", f"vars_mean_{location}.png")
+#     _plot("variance", "Variance", f"vars_var_{location}.png")
+#     _plot("cv", "Coefficient of Variation", f"vars_cv_{location}.png")
+
+def plot_correlations(corr: np.ndarray,
+                      times=None,
+                      labels=None,
+                      title=None,
+                      rolling=None,  
+                      save_path=None):
+    """
+    corr: (T, K) array of correlations in [-1,1]
+    times: length-T array-like (ints or datetimes). If None, uses range(T)
+    labels: length-K iterable of series names
+    rolling: window size for optional rolling mean overlay (int or None)
+    save_path: path to save the figure (PNG). If None, just shows it.
+    """
+    corr = np.asarray(corr)
+    assert corr.ndim == 2, "corr must be 2D (T x K)"
+    T, K = corr.shape
+    if times is None:
+        times = np.arange(T)
+    else:
+        times = np.asarray(times)
+
+    # Mask impossible values or NaNs
+    corr = np.where(np.isfinite(corr), corr, np.nan)
+    corr = np.clip(corr, -1.0, 1.0)
+
+    plt.figure(figsize=(10, 5))
+    for k in range(K):
+        y = corr[:, k]
+        plt.plot(times, y, linewidth=1.5, label=labels[k] if k < len(labels) else f"var{k}")
+
+        # Optional rolling mean overlay
+        if rolling and rolling > 1 and rolling < T:
+            # simple centered rolling; pad ends with NaN
+            pad = rolling // 2
+            kernel = np.ones(rolling) / rolling
+            y_roll = np.convolve(np.where(np.isnan(y), 0.0, y), kernel, mode="same")
+            # naive NaN handling: mask positions where original had too many NaNs in window
+            isn = np.isnan(y)
+            valid_counts = np.convolve((~isn).astype(float), np.ones(rolling), mode="same")
+            y_roll[valid_counts < max(1, rolling//2)] = np.nan
+            plt.plot(times, y_roll, linestyle="--", linewidth=1.0)
+
+    # Reference lines
+    plt.axhline(0.0, linestyle="--", linewidth=1)
+    plt.axhline(1.0, linestyle=":", linewidth=0.8)
+    plt.axhline(-1.0, linestyle=":", linewidth=0.8)
+
+    plt.ylim(-1.05, 1.05)
+    plt.xlabel("Time")
+    plt.ylabel("Correlation")
+    plt.title(title)
+    plt.legend(ncol=min(K, 4))
+    plt.grid(True, alpha=0.25)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+    else:
+        plt.show()
 
 def compute_quantiles_from_ensemble(ens, quantiles):
     """
@@ -34,7 +271,7 @@ def compute_quantiles_from_ensemble(ens, quantiles):
     return quantile_df
 
 
-def remove_outliers(ensemble, threshold_factor=4):
+def remove_outliers(ensemble, threshold_factor=3):
     """
     Check if certain values in the ensemble are too far off from the others
     (e.g., more than `threshold_factor` times the std from the mean).
@@ -135,45 +372,51 @@ def eakf_update(state_ensembles, obs_ensemble, obs_truth, obs_var,
     num_states = state_ensembles.shape[0]
     updated_state_ensembles = state_ensembles.copy()
 
+    K_vals = np.empty(num_states, dtype=float)
+    prior_var_vals = np.empty(num_states, dtype=float)
+    post_var_vals = np.empty(num_states, dtype=float)
+    post2_var_vals = np.empty(num_states, dtype=float)
+
     for i in range(num_states):
         # Calculate covariance between current state and obs_ensemble
         cov = np.cov(state_ensembles[i, :], obs_ensemble)[0, 1]
-        rr = cov / prior_var  # Scaling factor
-
+        K = cov / prior_var  # Kalman gain
         # Apply update
-        updated_state_ensembles[i, :] += rr * dy
+        updated_state_ensembles[i, :] += K * dy
 
-    # Inflate ensemble to maintain variability
-    for i in range(num_states):
+        # save states for debugging
+        K_vals[i] = K
+        prior_var_vals[i] = np.var(state_ensembles[i, :])
+        post_var_vals[i] = np.var(updated_state_ensembles[i, :])
+
+        # Inflate ensemble to maintain variability
         state_mean = np.mean(updated_state_ensembles[i, :])
         deviations = updated_state_ensembles[i, :] - state_mean
         updated_state_ensembles[i, :] = state_mean + inflation_factor * deviations
-    
-    # Enforce bounds after inflation
-    if min_values is not None and max_values is not None:
-        for i in range(num_states):
+        
+        # Enforce bounds after inflation
+        if min_values is not None and max_values is not None:
             lower_bound = min_values[i]
             upper_bound = max_values[i]
-            ensemble = updated_state_ensembles[i, :]
-
+            updated_state_ensembles[i, :] = np.clip(updated_state_ensembles[i, :],lower_bound,upper_bound)
             # # Identify out-of-bound values
             #out_of_bounds = (ensemble < lower_bound) | (ensemble > upper_bound)
             #if np.any(out_of_bounds):
             #    # Replace out-of-bound values with the mean
             #    ensemble[out_of_bounds] = np.mean(ensemble)
-
             # ensemble = remove_outliers(ensemble)
-            ensemble = np.clip(ensemble,lower_bound,upper_bound)
-            updated_state_ensembles[i, :] = ensemble
 
-    return updated_state_ensembles
+        post2_var_vals[i] = np.var(updated_state_ensembles[i, :])
+
+
+    return updated_state_ensembles, K_vals, prior_var_vals, post_var_vals, post2_var_vals
 
 
 # Main SIR-EAKF model
 def sir_eakf(num_ensembles, N, S_min, S_max, I_min, I_max, 
-             beta_min, beta_max, gamma_min, gamma_max,
+             gamma, Reff_min, Reff_max, rho_min, rho_max,
              weeks_to_predict, obs_data, obs_var=None,
-             reporting_factor=1.0, inflation_factor=1.05):
+             inflation_factor=1.02, location='NA', random_state=None):
     """
     Perform SIR modeling with EAKF assimilation on observed data, then forecast weeks_to_predict.
 
@@ -200,96 +443,127 @@ def sir_eakf(num_ensembles, N, S_min, S_max, I_min, I_max,
             Factor to inflate the ensemble (default: 1.05).
 
     Returns:
-        weekly_I_obs: np.ndarray
-            A 2D array of shape (obs_len + weeks_to_predict, num_ensembles) containing observed weekly infections.
-        beta_ensemble: np.ndarray
-            A 2D array of shape (obs_len + weeks_to_predict, num_ensembles) containing beta values.
-        gamma_ensemble: np.ndarray
-            A 2D array of shape (obs_len + weeks_to_predict, num_ensembles) containing gamma values.
+        pred_vals: np.ndarray
+            A 2D array of shape (weeks_to_predict, num_ensembles) containing observed weekly infections.
     """
-    # Initialize ensembles
-    S = np.random.uniform(S_min, S_max, num_ensembles)
-    I = np.random.uniform(I_min, I_max, num_ensembles)
-    beta_ensemble = np.random.uniform(beta_min, beta_max, num_ensembles)
-    gamma_ensemble = np.random.uniform(gamma_min, gamma_max, num_ensembles)
 
-    min_values = [0, 0, beta_min, gamma_min]
-    max_values = [N, S_max, beta_max, gamma_max]
+    rng = np.random.default_rng(random_state)
+
+    
+  
+    # Initialize ensembles
+    S = rng.uniform(S_min, S_max, num_ensembles)
+    I = rng.uniform(I_min, I_max, num_ensembles)
+    Reff = rng.uniform(Reff_min, Reff_max, num_ensembles)
+    beta_ensemble = Reff*gamma/S*N
+    rho_ensemble = rng.uniform(rho_min, rho_max, num_ensembles)
+
+    beta_min = Reff_min*gamma/S_max*N
+    beta_max = Reff_max*gamma/S_min*N
+
+    min_values = [0, 0, beta_min, rho_min]
+    max_values = [N, N, beta_max, rho_max]
 
     obs_len = len(obs_data)
 
-    if(obs_var is None):
-        obs_var = 1e-5 + obs_data**2/100
+    calc_obs_var = (obs_var is None)
+    if(calc_obs_var):
+        # obs_var = 1e-5 + obs_data**2/100
+        obs_var = np.zeros(obs_len,)
+        use_nb = True
+        k_nb = 100.0  # NegBin dispersion
 
-
-    # Track weekly infections over time
+    # Track weekly infections and observations (hospitalizations) over time
     weekly_I = np.zeros((obs_len + weeks_to_predict, num_ensembles))
     weekly_I_obs = np.zeros((obs_len + weeks_to_predict, num_ensembles))
     # print(f"Week 0: beta_mean={np.mean(beta_ensemble):.4f}, beta_std={np.std(beta_ensemble):.4f}, gamma_mean={np.mean(gamma_ensemble):.4f}, gamma_std={np.std(gamma_ensemble):.4f}")
+
+    save_debug_info = False
+    if(save_debug_info):
+        state_names = ["S", "I", "beta", "rho"] 
+        calc_types   = ["kalman_gain", "prior_var", "post_var", "post2_var", "post_mean"]
+        calc_rows = []
+        corr_mat = np.zeros((obs_len,4))
 
     # Assimilate observed data
     for t in range(obs_len):
         # Run the SIR model for one week (7 days)
         for _ in range(7):
-
             # Run SIR for one time step
-            S, I, new_infected = sir_step(S, I, beta_ensemble, gamma_ensemble, N)
-
+            S, I, new_infected = sir_step(S, I, beta_ensemble, gamma, N)
             # Accumulate weekly infections
             weekly_I[t, :] += new_infected
 
-        # weekly_I_obs[t, :] = weekly_I[t, :]*reporting_factor
-        weekly_I_obs[t, :] = np.random.binomial(weekly_I[t, :].astype(int), reporting_factor)
+        weekly_I_obs[t, :] = weekly_I[t, :]*rho_ensemble
+        # weekly_I_obs[t,:] = remove_outliers(weekly_I_obs[t,:])
 
-        # if(t>5):
-        #     weekly_I_mean = np.mean(weekly_I_obs, axis=1)
-        #     past_errors = obs_data[:t] - weekly_I_mean[:t]
-        #     obs_based_var = np.mean(past_errors**2)
-        #     spread = np.std(weekly_I_obs[t, :])
-        #     spread_based_var = 0.5 * spread**2
-        #     obs_var[t] = 0.2*spread_based_var + 0.8*obs_based_var
-
-        # print(f"Week {t}: obs_var={np.mean(obs_var[t]):.4f}")
+        if(calc_obs_var):
+            mu = weekly_I_obs[t, :]
+            if(use_nb):
+                obs_var[t] = np.maximum((mu + (mu**2)/k_nb).mean(), 1e-5)
+            else:
+                obs_var[t] = np.maximum(mu.mean(), 1e-5)
+                # rho = rho_ensemble.mean()
+                # obs_var[t] = (rho * (1.0 - rho) * np.maximum(mu.mean(), 1.0))
 
         # EAKF update
-        state_ensembles = np.array([S, I, beta_ensemble, gamma_ensemble])
-        updated_ensembles = eakf_update(
+        state_ensembles = np.array([S, I, beta_ensemble, rho_ensemble])
+        updated_ensembles, K_vals, prior_var, post_var, post2_var = eakf_update(
             state_ensembles, weekly_I_obs[t, :], obs_data[t], obs_var[t], min_values, max_values, inflation_factor
         )
-
         # Unpack updated state variables and parameters
-        S, I, beta_ensemble, gamma_ensemble = updated_ensembles
+        S, I, beta_ensemble, rho_ensemble = updated_ensembles
+
+        if(save_debug_info):
+            row = {"time": t}
+            post_mean = [S.mean(), I.mean(), beta_ensemble.mean(), rho_ensemble.mean() ]
+            vals = {"kalman_gain": K_vals, "prior_var": prior_var, "post_var": post_var, "post2_var": post2_var, "post_mean": post_mean}
+            for s_idx, s_name in enumerate(state_names):
+                for vt in calc_types:
+                    row[f"{s_name}_{vt}"] = float(vals[vt][s_idx])
+            calc_rows.append(row)
+            corr_mat[t,0] = np.corrcoef(S,weekly_I_obs[t, :])[0,1]
+            corr_mat[t,1] = np.corrcoef(I,weekly_I_obs[t, :])[0,1]
+            corr_mat[t,2] = np.corrcoef(beta_ensemble,weekly_I_obs[t, :])[0,1]
+            corr_mat[t,3] = np.corrcoef(rho_ensemble,weekly_I_obs[t, :])[0,1]
 
         # print(f"Week {t}: beta={np.mean(beta_ensemble):.4f}, gamma={np.mean(gamma_ensemble):.4f}, I={np.mean(I):.4f}, S={np.mean(S):.4f}")
     
+    if(save_debug_info):
+        df_calc = pd.DataFrame(calc_rows)
+        ordered_cols = (["time"] + [f"{s}_{vt}" for s in state_names for vt in calc_types])
+        df_calc = df_calc[ordered_cols]
+        df_calc.to_csv(f"./tmp/kalman_calc_{location}.csv", index=False)
+        plot_means_vars_cv_from_df(df_calc,state_names,location,"./tmp")
+        plot_correlations(corr_mat, labels=state_names, title=f'Correlation with computed observations {location}')
+
 
     # Forecast weeks_to_predict from the last observed week
     for t in range(obs_len, obs_len + weeks_to_predict):
         for _ in range(7):
-
             # Run SIR for one time step
-            S, I, new_infected = sir_step(S, I, beta_ensemble, gamma_ensemble, N)
-
+            S, I, new_infected = sir_step(S, I, beta_ensemble, gamma, N)
             # Accumulate weekly infections
             weekly_I[t, :] += new_infected
+        weekly_I_obs[t,:] = weekly_I[t, :]*rho_ensemble
+        # weekly_I_obs[t,:] = remove_outliers(weekly_I_obs[t,:],2)
 
-        weekly_I[t, :] = remove_outliers(weekly_I[t, :])
-
-    weekly_I_obs = weekly_I*reporting_factor
-    # weekly_I_obs = np.random.binomial(weekly_I.astype(int), reporting_factor)
-    return weekly_I_obs
+    pred_vals = weekly_I_obs[obs_len:,]
+    return pred_vals
 
 
 def generate_sir_eakf_pred(df, start_date, ref_date, weeks_to_predict, locations, quantiles, num_samples, 
-                           dat_changerate_ref, basedir, model_desc='SIR-EAKF'):
+                           dat_changerate_ref, basedir, model_desc='SIR-EAKF', 
+                           generate_qual_pred=True, save_results=True,
+                           return_samples=False, random_state=None):
     
     N = 1e5 
-    S_min, S_max = 0.2 * N, 0.8 * N #0.2 * N, 0.6 * N #
+    S_min, S_max = 0.5 * N, 1 * N #0.2 * N, 0.8 * N #0.2 * N, 0.6 * N #
     # I_min, I_max = 1, 200
-    beta_min, beta_max = 0.5, 1 
-    gamma_min, gamma_max = 0.2, 0.5
-    reporting_factor = 0.003
-    inflation_factor = 1.05
+    gamma = 0.333
+    Reff_min, Reff_max = 1.0, 1.4
+    rho_min, rho_max = 0.001, 0.01 #0.003,0.003 #
+    inflation_factor = 1.00
 
     quantile_labels = [f"{q * 100:.1f}%" for q in quantiles]
 
@@ -307,6 +581,7 @@ def generate_sir_eakf_pred(df, start_date, ref_date, weeks_to_predict, locations
     obs_var = None
 
     pred_results = []
+    samples_results = []        # will hold per-location samples in long format
 
     # Loop through each location
     locations_abbr = locations.index 
@@ -321,42 +596,70 @@ def generate_sir_eakf_pred(df, start_date, ref_date, weeks_to_predict, locations
         obs_data = obs_data/pop_size*N
         obs_len = len(obs_data)
 
-        I0 = int(obs_data[0]/7/reporting_factor)
-        I_min = int(max(1,I0/10))
-        I_max = max(I0*10,10)
+        rho = ((rho_max+rho_min)/2)
+        I0 = int(obs_data[0]/7/rho)
+        I_min = int(max(1,I0/5))
+        I_max = max(10,I0*5)
         # print(f"Location {loc_abbr}: I_min={I_min}, I_max={I_max}")
 
-        obs_I_ens = sir_eakf(num_samples, N, S_min, S_max, I_min, I_max, 
-                             beta_min, beta_max, gamma_min, gamma_max, 
+        pred_vals = sir_eakf(num_samples, N, S_min, S_max, I_min, I_max, 
+                             gamma, Reff_min, Reff_max, rho_min, rho_max, 
                              weeks_to_predict, obs_data, obs_var, 
-                             reporting_factor, inflation_factor)
+                             inflation_factor, location=loc_abbr, random_state=random_state)
         
-        obs_I_ens = obs_I_ens*pop_size/N
-        quantile_df = compute_quantiles_from_ensemble(obs_I_ens, quantiles)
+        pred_vals = pred_vals*pop_size/N
+        quantile_df = compute_quantiles_from_ensemble(pred_vals, quantiles)
 
         for horizon in range(weeks_to_predict):
             target_date = ref_date + timedelta(weeks=horizon)
-            week = obs_len + horizon
+            # week = obs_len + horizon
             for i, quantile in enumerate(quantiles):
-                predicted_value = quantile_df.loc[(quantile_df['week']==week),quantile_labels[i]].values[0]
+                predicted_value = quantile_df.loc[(quantile_df['week']==horizon),quantile_labels[i]].values[0]
                 pred_results.append([format(ref_date,'%Y-%m-%d'),'wk inc flu hosp',horizon,format(target_date,'%Y-%m-%d'),
                                      location,'quantile',np.round(quantile,3),np.round(predicted_value,3)])
 
-            pred_vals = obs_I_ens[week,:]
-            pred_qual = generate_qualtitative_pred(ref_date, location, horizon, pred_vals, ref_val, pop_size)
-            pred_results = pred_results+pred_qual
+            if(generate_qual_pred):
+                pred_vals_h = pred_vals[horizon,:]
+                pred_qual = generate_qualtitative_pred(ref_date, location, horizon, pred_vals_h, ref_val, pop_size)
+                pred_results = pred_results+pred_qual
+
+            # --------- Collect samples for this location (optional) ----------
+        if return_samples:
+            # Build long/tidy DataFrame for this location
+            horizons = np.arange(weeks_to_predict)
+            dates = (pd.to_datetime(ref_date) + pd.to_timedelta(horizons, unit="W")).to_numpy()
+
+            # Repeat/tile to long
+            H = weeks_to_predict
+            S = num_samples
+            df_loc = pd.DataFrame({
+                "reference_date": np.repeat(ref_date, H*S),
+                "location": np.repeat(str(location).zfill(2), H*S),
+                "horizon": np.repeat(horizons, S),
+                "target_end_date": np.repeat(dates, S),
+                "sample_id": np.tile(np.arange(S), H),
+                "value": pred_vals.reshape(-1)
+            })
+            samples_results.append(df_loc)
 
         df_pred_results = pd.DataFrame(pred_results,columns=['reference_date','target','horizon','target_end_date',
                                                          'location','output_type','output_type_id','value']) 
 
-    target_order = ['wk inc flu hosp', 'wk flu hosp rate change']
-    df_pred_results['target'] = pd.Categorical(df_pred_results['target'], categories=target_order, ordered=True)
-    df_pred_results = df_pred_results.sort_values(by=['target', 'location','horizon'])
+    if(generate_qual_pred):
+        target_order = ['wk inc flu hosp', 'wk flu hosp rate change']
+        df_pred_results['target'] = pd.Categorical(df_pred_results['target'], categories=target_order, ordered=True)
+        df_pred_results = df_pred_results.sort_values(by=['target', 'location','horizon'])
 
     df_pred_results['location'] = df_pred_results['location'].astype(str).str.zfill(2)
 
-    output_dir = "{}/{}".format(basedir, model_desc)
-    if not os.path.isdir(output_dir):
-        os.makedirs(output_dir)
-    df_pred_results.to_csv("{}/{}-CU-{}.csv".format(output_dir,format(ref_date,'%Y-%m-%d'),model_desc), index=False) 
+    if(save_results):
+        output_dir = "{}/{}".format(basedir, model_desc)
+        if not os.path.isdir(output_dir):
+            os.makedirs(output_dir)
+        df_pred_results.to_csv("{}/{}-CU-{}.csv".format(output_dir,format(ref_date,'%Y-%m-%d'),model_desc), index=False) 
+    
+    if return_samples:
+        df_samples = pd.concat(samples_results, ignore_index=True) 
+        return df_pred_results, df_samples
+    
     return df_pred_results
