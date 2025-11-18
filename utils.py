@@ -4,7 +4,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 import epiweeks as ew
-from datetime import timedelta #, datetime, date
+from datetime import timedelta, date #, datetime, 
 
 from statsmodels.tsa.seasonal import STL
 
@@ -13,6 +13,24 @@ import requests
 import os
 
 
+def parse_date_column(df, column):
+    """Try parsing a date column with multiple possible formats."""
+    try:
+        df[column] = pd.to_datetime(df[column], format='%m/%d/%Y')
+    except ValueError:
+        df[column] = pd.to_datetime(df[column], format='%Y-%m-%d')
+    return df
+
+def iso_week_tuples(start_year, start_week, end_year, end_week):
+    """Inclusive list of (ISO-year, ISO-week) tuples from start to end."""
+    d = date.fromisocalendar(start_year, start_week, 1)  # Monday of start week
+    end = date.fromisocalendar(end_year, end_week, 1)    # Monday of end week
+    out = []
+    while d <= end:
+        iso = d.isocalendar()        # ISO year/week/day
+        out.append((iso.year, iso.week))
+        d += timedelta(weeks=1)
+    return out
 
 def date_to_epiweek(date):
     """
@@ -28,9 +46,9 @@ def epiweek_to_dates(year, epiweek):
     return dates
 
 def map_week_to_week_season(week):
-    if week >= 40:  # Weeks 40–52
+    if week >= 40:  # Weeks 40ï¿½52
         return week - 39 #week - 40
-    else:  # Weeks 1–39
+    else:  # Weeks 1ï¿½39
         return week + 13 #week + 12
     
 def get_season(year, week):
@@ -181,21 +199,20 @@ def format_hosp_data(filename, states):
     # select and format required columns
     df = df[['Week Ending Date', 'Geographic aggregation', 
              'Total Influenza Admissions', 'Number Hospitals Reporting Influenza Admissions']]
+    #'Number Hospitals Reporting  Influenza Admissions'
     df.rename(columns={'Week Ending Date' : 'date',
                        'Geographic aggregation': 'state',
                        'Total Influenza Admissions': 'cases',
                        'Number Hospitals Reporting Influenza Admissions': 'reporting'
-
                        }, inplace=True)
     
-    try:
-        df['date'] = pd.to_datetime(df['date'], format='%m/%d/%Y')
-    except ValueError:
-        df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d')
+    df = parse_date_column(df, 'date')
     df['cases'] = df['cases'].replace(['NA', 'nan', ''], pd.NA)
-    df['cases'] = df['cases'].astype('Int64')
+    df['cases'] = df['cases'].astype(str).str.replace(",", "", regex=False).str.strip()
+    df['cases'] = pd.to_numeric(df['cases'], errors="coerce").astype("Int64")
     df['reporting'] = df['reporting'].replace(['NA', 'nan', ''], pd.NA)
-    df['reporting'] = df['reporting'].astype('Int64')
+    df['reporting'] = df['reporting'].astype(str).str.replace(",", "", regex=False).str.strip()
+    df['reporting'] = pd.to_numeric(df['reporting'], errors="coerce").astype("Int64")   
     df['state'] = df['state'].replace('USA', 'US')
     df = df[(df['state'] != 'AS')]
 
@@ -236,7 +253,9 @@ def fetch_ili_data(regions, epiweek_range):
     """
     base_url = "https://api.delphi.cmu.edu/epidata/fluview/"
 
-    api_key = "<the_api_key>"
+    # api_key = "<the_api_key>"
+    api_key = "ace953b1f2e22"
+
 
     regions = regions.copy()
     regions[regions=='US'] = 'nat'
@@ -283,7 +302,7 @@ def read_hosp_incidence_data(data_dir, epiyear, epiweek, states,
     df_reports = None
     if(not os.path.exists(hosp_data_fname)):
         if(new_format): #2024-2025 format
-            filename = 'Weekly_Hospital_Respiratory_Data__HRD__Metrics_by_Jurisdiction__National_Healthcare_Safety_Network__NHSN.csv'
+            filename = 'Weekly_Hospital_Respiratory_Data_(HRD)_Metrics_by_Jurisdiction_National_Healthcare_Safety_Network_(NHSN).csv'
             url = ""
         else:
             filename = 'COVID-19_Reported_Patient_Impact_and_Hospital_Capacity_by_State_Timeseries.csv'
@@ -354,6 +373,66 @@ def read_hosp_incidence_data(data_dir, epiyear, epiweek, states,
         plt.subplots_adjust(hspace=0.4, wspace=0.4)
 
     return (df_hosp)
+
+
+def read_hosp_incidence_data_new(data_dir, epiyear, epiweek,
+                                 ref_date, states, loc_name2abbr,
+                                 fix_outliers=False, plot=False) :
+    
+    hosp_data_fname = data_dir + "hosp_cases_{}_{}.csv".format(epiyear,epiweek)
+    if(os.path.exists(hosp_data_fname)):
+        df = pd.read_csv(hosp_data_fname)
+        df = parse_date_column(df, 'date')
+    else:
+        file_path = f"{data_dir}hosp_cases_as_of.csv"
+        df = pd.read_csv(file_path)
+        df = parse_date_column(df, 'as_of')
+        df = parse_date_column(df, 'target_end_date')
+
+        as_of_dates = df['as_of']
+        filter_date = as_of_dates[as_of_dates >= ref_date].min()
+        if pd.isna(filter_date):
+            filter_date = as_of_dates[as_of_dates < ref_date].max()
+
+        df = df[df.as_of==filter_date]
+        df['location_name'] = df['location_name'].replace(loc_name2abbr)
+        df = df[df.location_name.isin(states)]
+        df = df[["target_end_date","location_name","observation"]]
+        df = df.drop_duplicates()
+        df = df.pivot(index='target_end_date', columns='location_name', values="observation").reset_index()
+        df = df.rename(columns={'target_end_date' : 'date'})
+        df['year'] = df['date'].apply(lambda d: date_to_epiweek(d)[0])
+        df['week'] = df['date'].apply(lambda d: date_to_epiweek(d)[1])
+        cols = ['date', 'year', 'week']
+        df = df[cols + [c for c in df.columns if c not in cols]]
+        df = df[(pd.to_numeric(df["year"], errors="coerce") < epiyear) |
+                 ((pd.to_numeric(df["year"], errors="coerce") == epiyear) &
+                 (pd.to_numeric(df["week"], errors="coerce") < epiweek))]
+        df.to_csv(hosp_data_fname,index=False)
+
+    # max_date = df['date'].max()
+    # cut_date = pd.Timestamp(epiweek_to_dates(epiyear, epiweek).enddate())
+    # if(max_date > cut_date):
+    #     print("Max date {} is larger than the cut date {} - data will be truncated".format(max_date,cut_date))
+    #     df = df[df['date']<=cut_date]
+
+    if(fix_outliers):
+            peak_dates = get_peak_dates_per_state(df, states)
+            for state in states:
+                df_state = df[state]
+                df_state.index = df['date']
+                df_state_fixed, _ = fix_ts_outliers(df_state, peak_dates[state])
+                df[state] = df_state_fixed.values
+
+    if(plot):
+        df_long = pd.melt(df,id_vars=['date','year','week'],value_vars=df.columns[3:],var_name='state',value_name='hosp cases')
+        g = sns.FacetGrid(df_long, col="state", col_wrap=5, hue="state", sharey=False, sharex=True, height=3, aspect=1.33)
+        g.map(sns.lineplot, "date", "hosp cases")
+        [plt.setp(ax.get_xticklabels(), rotation=90) for ax in g.axes.flat]
+        plt.subplots_adjust(hspace=0.4, wspace=0.4)
+
+    return df
+
 
 
 def read_lab_selected_data(data_dir, epiyear, epiweek, states, loc_name2abbr, sel_col, plot=True):
@@ -443,6 +522,19 @@ def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, smooth=
     return (df_ili)
 
 
+def read_influenza_ed_visits_prop_data(data_dir, loc_name2abbr):
+    ed_visits_fname = f"{data_dir}/target-ed-visits-prop.csv"
+    df_edvp = pd.read_csv(ed_visits_fname)
+    df_edvp['location_abbr'] = df_edvp['location_name'].replace(loc_name2abbr)
+    try:
+        df_edvp['date'] = pd.to_datetime(df_edvp['date'], format='%m/%d/%Y')
+    except ValueError:
+        df_edvp['date'] = pd.to_datetime(df_edvp['date'], format='%Y-%m-%d')
+    df_edvp['year'] = df_edvp['date'].apply(lambda d: date_to_epiweek(d)[0])
+    df_edvp['week'] = df_edvp['date'].apply(lambda d: date_to_epiweek(d)[1])
+    df_edvp = df_edvp.pivot(index=['date','year','week'], columns='location_abbr', values="value").reset_index()
+    return df_edvp
+
 def read_AH(data_dir):
     AH_fname = data_dir +"AH.csv"
     AH_daily = pd.read_csv(AH_fname)
@@ -462,10 +554,27 @@ def read_AH(data_dir):
     df_AH = df_AH[['date'] + [col for col in df_AH.columns if col != 'date']]
     return (AH_daily, df_AH)
 
+# def calculate_wis0(truth, df_pred, alpha_vals):
+#     wis_vals = 0
+#     if hasattr(truth, "__len__"):
+#        wis_vals = np.zeros(len(truth)) 
+#     for alpha in alpha_vals:
+#         low_vals = df_pred.loc[df_pred['quantile']==np.round(alpha/2,3),'value'].values
+#         high_vals = df_pred.loc[df_pred['quantile']==np.round(1-alpha/2,3),'value'].values
+#         int_width = high_vals - low_vals
+#         too_low = (truth < low_vals).astype(int)
+#         too_high = (truth > high_vals).astype(int)
+#         too_low_penalty = (2/alpha)*too_low*(low_vals - truth)
+#         too_high_penalty = (2/alpha)*too_high*(truth - high_vals)
+#         wis_vals += (alpha/2)*(int_width + too_low_penalty + too_high_penalty)
+#     K = len(alpha_vals)-1
+#     wis_vals = wis_vals/(K+0.5)
+#     #wis_vals = wis_vals/np.sum(np.array(alpha_vals)/2)
+#     return wis_vals
+
 def calculate_wis(truth, df_pred, alpha_vals):
-    wis_vals = 0
-    if hasattr(truth, "__len__"):
-       wis_vals = np.zeros(len(truth)) 
+    median = df_pred.loc[df_pred['quantile']==0.5,'value'].values
+    wis_vals = np.abs(median-truth)/2
     for alpha in alpha_vals:
         low_vals = df_pred.loc[df_pred['quantile']==np.round(alpha/2,3),'value'].values
         high_vals = df_pred.loc[df_pred['quantile']==np.round(1-alpha/2,3),'value'].values
@@ -475,37 +584,37 @@ def calculate_wis(truth, df_pred, alpha_vals):
         too_low_penalty = (2/alpha)*too_low*(low_vals - truth)
         too_high_penalty = (2/alpha)*too_high*(truth - high_vals)
         wis_vals += (alpha/2)*(int_width + too_low_penalty + too_high_penalty)
-    K = len(alpha_vals)-1
+    K = len(alpha_vals)
     wis_vals = wis_vals/(K+0.5)
-    #wis_vals = wis_vals/np.sum(np.array(alpha_vals)/2)
     return wis_vals
-
-
-
-
 
 def load_pred_result_files(basedir, model_desc, locations):
 
-    results_dir = "{}/{}".format(basedir,model_desc)
-    file_list = os.listdir(results_dir)
-    df_results = None
-    for i, file in enumerate(file_list):
-        df_results_cur = pd.read_csv("{}/{}".format(results_dir,file))
-        if(i==0):
-            df_results = df_results_cur
-        else:
-            df_results = pd.concat([df_results,df_results_cur])
-    
-    df_results['reference_date'] = pd.to_datetime(df_results['reference_date'], format='%Y-%m-%d')
-    df_results['target_end_date'] = pd.to_datetime(df_results['target_end_date'], format='%Y-%m-%d')
-    #df_results['location'] = [loc.lstrip('0') for loc in df_results['location']]
-    df_results = df_results.astype({"output_type_id": str})
-    df_results['output_type_id'] = [val.rstrip('0') for val in df_results['output_type_id']]
-    df_results = df_results[df_results['horizon']>=0]
-    df_results['horizon'] = df_results['horizon'].astype('Int32')
-    df_results = df_results[df_results.location.isin(locations.location)]
-    return (df_results)
+    try:
+        results_dir = "{}/{}".format(basedir,model_desc)
+        file_list = os.listdir(results_dir)
+        df_results = None
+        for i, file in enumerate(file_list):
+            df_results_cur = pd.read_csv("{}/{}".format(results_dir,file))
+            if(i==0):
+                df_results = df_results_cur
+            else:
+                df_results = pd.concat([df_results,df_results_cur])
+        
+        df_results['reference_date'] = pd.to_datetime(df_results['reference_date'], format='%Y-%m-%d')
+        df_results['target_end_date'] = pd.to_datetime(df_results['target_end_date'], format='%Y-%m-%d')
+        #df_results['location'] = [loc.lstrip('0') for loc in df_results['location']]
+        df_results = df_results.astype({"output_type_id": str})
+        df_results['output_type_id'] = [val.rstrip('0') for val in df_results['output_type_id']]
+        df_results = df_results[df_results['horizon']>=0]
+        df_results['horizon'] = df_results['horizon'].astype('Int32')
+        df_results = df_results[df_results.location.isin(locations.location)]
 
+    except Exception as err:
+        # warnings.warn(f"Unable to load predresults for model {model_desc}. Error: {err}")
+        return None
+
+    return df_results
 
 def fix_change_rate_values(df):
     locations = df.location.unique()
@@ -746,6 +855,47 @@ def generate_weighted_pred_results(results_dict, df_weights, locations,
     return df_ensemble
 
 
+def calc_models_pred_fit(df_dat, models, season, locations, 
+                         results_dir, figures_dir, alpha_vals, plot=True):
+    
+    df_metrics_all = pd.DataFrame({
+        'location': pd.Series(dtype='str'),
+        'model': pd.Series(dtype='str'),
+        'horizon': pd.Series(dtype='int'),
+        'target_date': pd.Series(dtype='str'),
+        'metric': pd.Series(dtype='str'),
+        'value': pd.Series(dtype='float')
+    })
+
+    if(season == 2024):
+        start_date='2023-10-14' 
+        end_date='2024-04-13' 
+    elif(season == 2025):
+        start_date='2024-11-23'
+        end_date='2025-05-31' 
+    elif(season == 2026):
+        start_date='2025-11-22'
+        end_date='2026-05-23' 
+    else:
+        print('unsupported season')
+        return
+    
+    for model in models:
+        df_results = load_pred_result_files(results_dir, model, locations)
+        df_results = df_results[df_results['target'] == 'wk inc flu hosp']
+        df_results = df_results[df_results['output_type'] == 'quantile']
+        df_results = df_results[df_results["reference_date"]>=pd.to_datetime(start_date)]
+        df_results = df_results[df_results["reference_date"]<=pd.to_datetime(end_date)]
+        if(season==2025):
+            #no data for this date at real time - no pred were made
+            df_results = df_results[df_results["reference_date"]!=pd.to_datetime("2025-01-25")]
+
+        print("-----------Calculating metrics for model: {}-----------".format(model))
+        for loc_abbr in locations.index:
+            df_metrics = calc_and_plot_pred_results_fit(df_results, df_dat, locations, loc_abbr,  
+                                                        alpha_vals, figures_dir, model, plot=plot)
+            df_metrics_all = pd.concat([df_metrics_all, df_metrics], ignore_index=True) 
+    return df_metrics_all
 
 def calc_pred_fit_ex(df_pred, df_dat, alpha_vals, pop_size):    
     df_pred = df_pred.merge(df_dat, how='inner',on='date',suffixes=('', '_truth'))
@@ -919,6 +1069,21 @@ def plot_pred_results_fit2(df_results, df_dat, locations, loc_abbr, basedir, mod
     plt.savefig(output_dir +"/" +loc_abbr + ".png", format="png", bbox_inches="tight", dpi=300)
 
 
+def update_hosp_with_nowcast(data_dir, df_hosp, cur_date):
+
+    df_nowcasted = pd.read_csv(data_dir +'hosp_cases_nowcasted.csv')
+    df_nowcasted['report_date'] = pd.to_datetime(df_nowcasted['report_date'], format='%Y-%m-%d')
+    df_nowcasted['observed_date'] = pd.to_datetime(df_nowcasted['observed_date'], format='%Y-%m-%d')
+    df_nowcasted = df_nowcasted[df_nowcasted['report_date']==cur_date]
+    if not df_nowcasted.empty:
+        df_nowcasted = df_nowcasted.pivot(index='observed_date', columns='state', values='cases').reset_index()
+        df_nowcasted = df_nowcasted.set_index('observed_date')
+        df_hosp = df_hosp.set_index('date')
+        df_hosp.update(df_nowcasted)
+        df_hosp = df_hosp.reset_index()
+        cols = ['date'] + [c for c in df_hosp.columns if c != 'date']
+        df_hosp = df_hosp[cols]
+    return (df_hosp)
 
 
 
