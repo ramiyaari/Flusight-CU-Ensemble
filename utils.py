@@ -12,6 +12,8 @@ import requests
 # import warnings
 import os
 
+from weekwise_mapping import *
+
 
 def parse_date_column(df, column):
     """Try parsing a date column with multiple possible formats."""
@@ -198,12 +200,12 @@ def format_hosp_data(filename, states):
 
     # select and format required columns
     df = df[['Week Ending Date', 'Geographic aggregation', 
-             'Total Influenza Admissions', 'Number Hospitals Reporting Influenza Admissions']]
-    #'Number Hospitals Reporting  Influenza Admissions'
+             'Total Influenza Admissions', 'Number Hospitals Reporting  Influenza Admissions']]
+
     df.rename(columns={'Week Ending Date' : 'date',
                        'Geographic aggregation': 'state',
                        'Total Influenza Admissions': 'cases',
-                       'Number Hospitals Reporting Influenza Admissions': 'reporting'
+                       'Number Hospitals Reporting  Influenza Admissions': 'reporting'
                        }, inplace=True)
     
     df = parse_date_column(df, 'date')
@@ -302,7 +304,7 @@ def read_hosp_incidence_data(data_dir, epiyear, epiweek, states,
     df_reports = None
     if(not os.path.exists(hosp_data_fname)):
         if(new_format): #2024-2025 format
-            filename = 'Weekly_Hospital_Respiratory_Data_(HRD)_Metrics_by_Jurisdiction_National_Healthcare_Safety_Network_(NHSN).csv'
+            filename = 'Weekly_Hospital_Respiratory_Data_NHSN.csv'
             url = ""
         else:
             filename = 'COVID-19_Reported_Patient_Impact_and_Hospital_Capacity_by_State_Timeseries.csv'
@@ -376,7 +378,7 @@ def read_hosp_incidence_data(data_dir, epiyear, epiweek, states,
 
 
 def read_hosp_incidence_data_new(data_dir, epiyear, epiweek,
-                                 ref_date, states, loc_name2abbr,
+                                 as_of_date, states, loc_name2abbr,
                                  fix_outliers=False, plot=False) :
     
     hosp_data_fname = data_dir + "hosp_cases_{}_{}.csv".format(epiyear,epiweek)
@@ -390,9 +392,9 @@ def read_hosp_incidence_data_new(data_dir, epiyear, epiweek,
         df = parse_date_column(df, 'target_end_date')
 
         as_of_dates = df['as_of']
-        filter_date = as_of_dates[as_of_dates >= ref_date].min()
+        filter_date = as_of_dates[as_of_dates >= as_of_date].min()
         if pd.isna(filter_date):
-            filter_date = as_of_dates[as_of_dates < ref_date].max()
+            filter_date = as_of_dates[as_of_dates < as_of_date].max()
 
         df = df[df.as_of==filter_date]
         df['location_name'] = df['location_name'].replace(loc_name2abbr)
@@ -475,7 +477,8 @@ def read_lab_selected_data(data_dir, epiyear, epiweek, states, loc_name2abbr, se
     return df_lab_sel
 
 
-def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, smooth=True, scale=True, plot=False):
+def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, 
+                            smooth=False, scale=False, regress=False, plot=False):
 
     ili_data_fname = data_dir + "ili_cases_{}_{}.csv".format(epiyear,epiweek)
     if not os.path.exists(ili_data_fname):
@@ -511,13 +514,32 @@ def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, smooth=
                     df_ili.loc[df_ili['year']==year, state] *= ratio
                 else:
                     df_ili.loc[df_ili['year']==year, state] *= mean_ratio
+    
+    df_ili0 = df_ili.copy()
+    if(regress):
+        maps = fit_weekwise_mapping(df_ili0, df_hosp, list(states), shrink_strength=5.0)
+        df_ili = apply_weekwise_mapping_to_preoverlap(df_ili0, maps, list(states))
 
     if(plot):
-        df_ili_long = pd.melt(df_ili,id_vars=['date','year','week'],value_vars=df_ili.columns[3:],var_name='state',value_name='weighted ili')
-        g = sns.FacetGrid(df_ili_long, col="state", col_wrap=5, hue="state", sharey=False, sharex=True, height=3, aspect=1.33)
-        g.map(sns.lineplot, "date", "weighted ili")
-        [plt.setp(ax.get_xticklabels(), rotation=90) for ax in g.axes.flat]
-        plt.subplots_adjust(hspace=0.4, wspace=0.4)
+        num_states = len(states)
+        fig, axs = plt.subplots(nrows=num_states, ncols=1, figsize=(7, 2 * num_states), sharex=True)
+        for i, state in enumerate(states):
+            ax = axs[i] if num_states > 1 else axs  # Handle single subplot case
+            ax.plot(df_hosp['date'], df_hosp[state], label='Hosp', color='black')
+            ax.plot(df_ili0['date'], df_ili0[state], label='ILI0', color='blue')
+            ax.plot(df_ili['date'], df_ili[state], label='ILI', color='red')
+            ax.set_title(f"{state}")
+            ax.set_ylabel("Cases")
+            ax.legend()
+        plt.xlabel("Date")
+        plt.tight_layout()
+        plt.show()
+
+        # df_ili_long = pd.melt(df_ili,id_vars=['date','year','week'],value_vars=df_ili.columns[3:],var_name='state',value_name='weighted ili')
+        # g = sns.FacetGrid(df_ili_long, col="state", col_wrap=5, hue="state", sharey=False, sharex=True, height=3, aspect=1.33)
+        # g.map(sns.lineplot, "date", "weighted ili")
+        # [plt.setp(ax.get_xticklabels(), rotation=90) for ax in g.axes.flat]
+        # plt.subplots_adjust(hspace=0.4, wspace=0.4)
 
     return (df_ili)
 
@@ -553,6 +575,62 @@ def read_AH(data_dir):
     df_AH['date'] = all_dates
     df_AH = df_AH[['date'] + [col for col in df_AH.columns if col != 'date']]
     return (AH_daily, df_AH)
+
+
+def load_and_format_nowcast_pred(path, ref_date, loc_name2loc):
+    # Read input
+    df = pd.read_csv(path)
+
+    df = parse_date_column(df, 'target_end_date')
+    max_date = df["target_end_date"].max()
+    df = df[df["target_end_date"]==max_date]
+
+    # All quantile columns start with "q_"
+    q_cols = [c for c in df.columns if c.startswith("q_")]
+
+    # Wide -> long: one row per (target_end_date, location, quantile)
+    long = df.melt(
+        id_vars=["target_end_date", "location_name"],
+        value_vars=q_cols,
+        var_name="quantile_col",
+        value_name="value",
+    )
+
+    # Extract numeric quantile from column name: "q_0.01" -> 0.01
+    long["output_type_id"] = (
+        long["quantile_col"]
+        .str.replace("q_", "", regex=False)
+        .astype(float)
+    )
+
+    ref_date = pd.to_datetime(ref_date)
+    target = "wk inc flu hosp"
+    horizon = -1 
+
+    long["reference_date"] = ref_date
+    long["target"] = target
+    long["horizon"] = horizon
+    long["output_type"] = "quantile"
+    long["location"] = long["location_name"]
+
+    # Reorder / select columns
+    out = long[
+        [
+            "reference_date",
+            "target",
+            "horizon",
+            "target_end_date",
+            "location",
+            "output_type",
+            "output_type_id",
+            "value",
+        ]
+    ].sort_values(["target_end_date", "location", "output_type_id"])
+
+    out['location'] = out['location'].replace(loc_name2loc)
+    out = out.reset_index(drop=True)
+    return out
+
 
 # def calculate_wis0(truth, df_pred, alpha_vals):
 #     wis_vals = 0
@@ -778,81 +856,183 @@ def generate_pred_weights(results_dict, df_metrics, locations,
     return df_weights
 
 
-def generate_weighted_pred_results(results_dict, df_weights, locations, 
+def generate_weighted_pred_results(results_dict, df_weights, locations,
                                    basedir, ensemble_name, average_over_horizons=False):
 
-    if(average_over_horizons):
-        df_weights = df_weights.groupby(['location','reference_date']).mean('weight').reset_index().drop(columns=['horizon'])     
-    
     models = list(results_dict.keys())
     df_ensemble = merge_pred_results(results_dict)
+
+    # Default: simple (unweighted) mean for all rows
     df_ensemble['value'] = np.round(df_ensemble[models].mean(axis=1), 3)
 
-    ref_dates = df_ensemble['reference_date'].unique()
-    horizons = df_ensemble.horizon.unique()
+    # --- PREP WEIGHTS ----------------------------------------------------
+    df_w = df_weights.copy()
 
-    for loc_abbr in locations.index:
-        location = locations.loc[loc_abbr].location
+    # Map weight locations (loc_abbr) to the location names used in df_ensemble
+    # If df_weights.location is already the same as df_ensemble.location, you can skip this block.
+    if 'location' in locations.columns:
+        # locations index = loc_abbr, column 'location' = full name/code used in df_ensemble
+        df_w = df_w.merge(
+            locations[['location']],
+            left_on='location',      # abbrev in weights
+            right_index=True,        # abbrev index in locations
+            how='left',
+            suffixes=('_abbr', '')
+        )
+        # Now df_w['location'] matches df_ensemble.location
 
-        # Filter the ensemble for the current location
-        df_ens_location = df_ensemble[
-            (df_ensemble.location == location) & (df_ensemble.output_type == 'quantile')
-        ]
+    # Average over horizons if requested
+    if average_over_horizons:
+        # collapse horizons -> mean of numeric columns (model weights)
+        df_w = (
+            df_w
+            .groupby(['location', 'reference_date'], as_index=False)
+            .mean(numeric_only=True)
+        )
+        merge_keys = ['location', 'reference_date']
+    else:
+        # keep horizon-specific weights
+        df_w = (
+            df_w
+            .groupby(['location', 'reference_date', 'horizon'], as_index=False)
+            .mean(numeric_only=True)
+        )
+        merge_keys = ['location', 'reference_date', 'horizon']
 
-        for horizon in horizons:
-            # Filter for the current horizon
-            df_ens_horizon = df_ens_location[df_ens_location.horizon == horizon]
+    # We only apply weights to quantile rows (same as your original code)
+    quant_mask = df_ensemble['output_type'] == 'quantile'
+    df_q = df_ensemble.loc[quant_mask].copy()
 
-            for t in ref_dates:
-                # Retrieve weights
-                if average_over_horizons:
-                    weights = df_weights[
-                        (df_weights.location == loc_abbr) & (df_weights.reference_date == t)
-                    ]
-                else:
-                    weights = df_weights[
-                        (df_weights.location == loc_abbr)
-                        & (df_weights.horizon == horizon)
-                        & (df_weights.reference_date == t)
-                    ]
+    # --- MERGE WEIGHTS INTO ENSEMBLE (vectorized instead of triple loop) ---
+    # Bring weight columns (same model names) onto each row
+    df_q = df_q.merge(
+        df_w[merge_keys + models],
+        on=merge_keys,
+        how='left',
+        suffixes=('', '_w')  # model cols from df_ensemble stay as-is; weights get _w
+    )
 
-                if weights.empty:
-                    continue
+    weight_cols = [m + '_w' for m in models]
 
-                # Filter for the reference date and compute weighted ensemble
-                df_ens_hlt = df_ens_horizon[df_ens_horizon.reference_date == t][models]
+    # Rows where we have all weights -> apply weighted combination
+    has_weights = df_q[weight_cols].notna().all(axis=1)
 
-                if not df_ens_hlt.empty:
-                    quantile_vals = np.sum(
-                        df_ens_hlt.values * weights[models].values.reshape(1, -1), axis=1
-                    )
-                    df_ensemble.loc[
-                        (df_ensemble.location == location)
-                        & (df_ensemble.horizon == horizon)
-                        & (df_ensemble.reference_date == t)
-                        & (df_ensemble.output_type == 'quantile'),
-                        'value',
-                    ] = np.round(quantile_vals, 3)
+    if has_weights.any():
+        pred_matrix = df_q.loc[has_weights, models].to_numpy(dtype=float)
+        weight_matrix = df_q.loc[has_weights, weight_cols].to_numpy(dtype=float)
 
+        # Row-wise dot product: sum_j pred_ij * w_ij
+        weighted_vals = np.einsum('ij,ij->i', pred_matrix, weight_matrix)
+        df_q.loc[has_weights, 'value'] = np.round(weighted_vals, 3)
+
+    # Drop temporary weight columns and copy back into main df_ensemble
+    df_q = df_q.drop(columns=weight_cols)
+    df_ensemble.loc[quant_mask, 'value'] = df_q['value'].values
+
+    # --- POST-PROCESSING (same as your original code) ---------------------
     # Drop model columns
     df_ensemble = df_ensemble.drop(labels=models, axis=1)
 
     # Round specific target values
     flu_hosp_mask = df_ensemble.target == 'wk inc flu hosp'
-    df_ensemble.loc[flu_hosp_mask, 'value'] = np.round(df_ensemble.loc[flu_hosp_mask, 'value'], 0)
+    df_ensemble.loc[flu_hosp_mask, 'value'] = np.round(
+        df_ensemble.loc[flu_hosp_mask, 'value'], 0
+    )
 
     df_ensemble['location'] = df_ensemble['location'].astype(str).str.zfill(2)
 
-    output_dir = "{}/{}".format(basedir, ensemble_name)
+    output_dir = f"{basedir}/{ensemble_name}"
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
+
+    ref_dates = df_ensemble['reference_date'].unique()
     for ref_date in ref_dates:
-        df_ensemble1 = df_ensemble[df_ensemble['reference_date']==ref_date]
+        mask = df_ensemble['reference_date'] == ref_date
+        df_ensemble1 = df_ensemble.loc[mask].copy()
         df_ensemble1 = fix_change_rate_values(df_ensemble1)
-        df_ensemble[df_ensemble['reference_date']==ref_date] = df_ensemble1
-        df_ensemble1.to_csv("{}/{}-CU-{}.csv".format(output_dir,format(ref_date,'%Y-%m-%d'),ensemble_name), index=False) 
+        df_ensemble.loc[mask] = df_ensemble1
+        df_ensemble1.to_csv(
+            f"{output_dir}/{ref_date:%Y-%m-%d}-CU-{ensemble_name}.csv",
+            index=False
+        )
 
     return df_ensemble
+
+# def generate_weighted_pred_results(results_dict, df_weights, locations, 
+#                                    basedir, ensemble_name, average_over_horizons=False):
+
+#     if(average_over_horizons):
+#         df_weights = df_weights.groupby(['location','reference_date']).mean('weight').reset_index().drop(columns=['horizon'])     
+    
+#     models = list(results_dict.keys())
+#     df_ensemble = merge_pred_results(results_dict)
+#     df_ensemble['value'] = np.round(df_ensemble[models].mean(axis=1), 3)
+
+#     ref_dates = df_ensemble['reference_date'].unique()
+#     horizons = df_ensemble.horizon.unique()
+
+#     for loc_abbr in locations.index:
+#         location = locations.loc[loc_abbr].location
+
+#         # Filter the ensemble for the current location
+#         df_ens_location = df_ensemble[
+#             (df_ensemble.location == location) & (df_ensemble.output_type == 'quantile')
+#         ]
+
+#         for horizon in horizons:
+#             # Filter for the current horizon
+#             df_ens_horizon = df_ens_location[df_ens_location.horizon == horizon]
+
+#             for t in ref_dates:
+#                 # Retrieve weights
+#                 if average_over_horizons:
+#                     weights = df_weights[
+#                         (df_weights.location == loc_abbr) & (df_weights.reference_date == t)
+#                     ]
+#                 else:
+#                     weights = df_weights[
+#                         (df_weights.location == loc_abbr)
+#                         & (df_weights.horizon == horizon)
+#                         & (df_weights.reference_date == t)
+#                     ]
+
+#                 if weights.empty:
+#                     continue
+
+#                 # Filter for the reference date and compute weighted ensemble
+#                 df_ens_hlt = df_ens_horizon[df_ens_horizon.reference_date == t][models]
+
+#                 if not df_ens_hlt.empty:
+#                     quantile_vals = np.sum(
+#                         df_ens_hlt.values * weights[models].values.reshape(1, -1), axis=1
+#                     )
+#                     df_ensemble.loc[
+#                         (df_ensemble.location == location)
+#                         & (df_ensemble.horizon == horizon)
+#                         & (df_ensemble.reference_date == t)
+#                         & (df_ensemble.output_type == 'quantile'),
+#                         'value',
+#                     ] = np.round(quantile_vals, 3)
+
+#     # Drop model columns
+#     df_ensemble = df_ensemble.drop(labels=models, axis=1)
+
+#     # Round specific target values
+#     flu_hosp_mask = df_ensemble.target == 'wk inc flu hosp'
+#     df_ensemble.loc[flu_hosp_mask, 'value'] = np.round(df_ensemble.loc[flu_hosp_mask, 'value'], 0)
+
+#     df_ensemble['location'] = df_ensemble['location'].astype(str).str.zfill(2)
+
+#     output_dir = "{}/{}".format(basedir, ensemble_name)
+#     if not os.path.isdir(output_dir):
+#         os.makedirs(output_dir)
+#     for ref_date in ref_dates:
+#         df_ensemble1 = df_ensemble[df_ensemble['reference_date']==ref_date]
+#         df_ensemble1 = fix_change_rate_values(df_ensemble1)
+#         df_ensemble[df_ensemble['reference_date']==ref_date] = df_ensemble1
+#         df_ensemble1.to_csv("{}/{}-CU-{}.csv".format(output_dir,format(ref_date,'%Y-%m-%d'),ensemble_name), index=False) 
+
+#     return df_ensemble
 
 
 def calc_models_pred_fit(df_dat, models, season, locations, 
@@ -874,7 +1054,7 @@ def calc_models_pred_fit(df_dat, models, season, locations,
         start_date='2024-11-23'
         end_date='2025-05-31' 
     elif(season == 2026):
-        start_date='2025-11-22'
+        start_date='2025-10-25' #'2025-11-22'
         end_date='2026-05-23' 
     else:
         print('unsupported season')
