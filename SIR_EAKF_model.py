@@ -448,8 +448,6 @@ def sir_eakf(num_ensembles, N, S_min, S_max, I_min, I_max,
     """
 
     rng = np.random.default_rng(random_state)
-
-    
   
     # Initialize ensembles
     S = rng.uniform(S_min, S_max, num_ensembles)
@@ -561,7 +559,7 @@ def generate_sir_eakf_pred(df, start_date, ref_date, weeks_to_predict, locations
     S_min, S_max = 0.5 * N, 1 * N #0.2 * N, 0.8 * N #0.2 * N, 0.6 * N #
     # I_min, I_max = 1, 200
     gamma = 0.333
-    Reff_min, Reff_max = 1.0, 1.4
+    Reff_min, Reff_max = 1.1, 1.3 #1.0, 1.4 #
     rho_min, rho_max = 0.001, 0.01 #0.003,0.003 #
     inflation_factor = 1.00
 

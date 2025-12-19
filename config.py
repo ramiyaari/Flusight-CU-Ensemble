@@ -2,13 +2,14 @@ from utils import *
 
 season = 2026 #2025 #2024 # 
 epiyear = 2025 #2024 #
-epiweek = 47 #15 #41 #
+epiweek = 51
 ref_date = epiweek_to_dates(epiyear, epiweek).enddate() #Saturday at the end of epiweek
 ref_date = pd.Timestamp(ref_date)
 
 data_dir = '../data/'
 results_dir = '../results/'
 figures_dir = f'../figures/{season}' 
+figures_comp_dir = f'../figures/{season}/multi_model_comparisons' 
 
 locations_fname = data_dir +"locations.csv"
 locations = pd.read_csv(locations_fname)

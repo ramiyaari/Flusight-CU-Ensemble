@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import math
 
 import epiweeks as ew
 from datetime import timedelta, date #, datetime, 
@@ -236,8 +237,12 @@ def format_hosp_data(filename, states):
     dat_weekly_reporting['week'] = dat_weekly_reporting['date'].apply(lambda d: date_to_epiweek(d)[1])
 
     # Filter the weekly data to include only the selected states
-    dat_weekly_cases = dat_weekly_cases[['date', 'year', 'week'] + states.tolist()]
-    dat_weekly_reporting = dat_weekly_reporting[['date', 'year', 'week'] + states.tolist()]
+    dat_weekly_cases = dat_weekly_cases[['date', 'year', 'week'] + sorted(states.tolist())]
+    dat_weekly_reporting = dat_weekly_reporting[['date', 'year', 'week'] + sorted(states.tolist())]
+
+    first_date = pd.to_datetime('2022-02-05', format="%Y-%m-%d")
+    dat_weekly_cases = dat_weekly_cases[dat_weekly_cases['date']>=first_date]
+    dat_weekly_reporting = dat_weekly_reporting[dat_weekly_reporting['date']>=first_date]
 
     return dat_weekly_cases, dat_weekly_reporting
 
@@ -405,8 +410,11 @@ def read_hosp_incidence_data_new(data_dir, epiyear, epiweek,
         df = df.rename(columns={'target_end_date' : 'date'})
         df['year'] = df['date'].apply(lambda d: date_to_epiweek(d)[0])
         df['week'] = df['date'].apply(lambda d: date_to_epiweek(d)[1])
-        cols = ['date', 'year', 'week']
-        df = df[cols + [c for c in df.columns if c not in cols]]
+        time_cols = ['date', 'year', 'week']
+        state_cols = sorted([c for c in df.columns if c not in time_cols])
+        df = df[time_cols + state_cols]
+        df[state_cols] = df[state_cols].fillna(0)
+        df[state_cols] = df[state_cols].astype(int)
         df = df[(pd.to_numeric(df["year"], errors="coerce") < epiyear) |
                  ((pd.to_numeric(df["year"], errors="coerce") == epiyear) &
                  (pd.to_numeric(df["week"], errors="coerce") < epiweek))]
@@ -435,6 +443,28 @@ def read_hosp_incidence_data_new(data_dir, epiyear, epiweek,
 
     return df
 
+def read_ili_from_ILINet(data_dir, epiyear, epiweek, states, loc_name2abbr):
+    # ili_data_fname = data_dir + "ILINet_{}_{}.csv".format(epiyear,epiweek)
+    ilinet_data_fname = data_dir + "ILINet.csv"
+    df_ili = pd.read_csv(ilinet_data_fname, na_values="X")
+    df_ili = df_ili.rename(columns={'YEAR':'year', 'WEEK':'week', 'REGION':'location'})
+    df_ili['date'] = df_ili.apply(lambda row: epiweek_to_dates(row['year'], row['week']).enddate(), axis=1)
+    df_ili = parse_date_column(df_ili,'date')
+    df_ili = df_ili[['date'] + [col for col in df_ili.columns if col != 'date']]
+    df_ili['location'] = df_ili['location'].replace(loc_name2abbr)
+    df_ili = df_ili[df_ili.location.isin(states)]
+    us_totals = (
+        df_ili.groupby("date", as_index=False)
+            .agg(
+                total_ili=("ILITOTAL", lambda s: s.sum(skipna=False)),
+                total_patients=("TOTAL PATIENTS", lambda s: s.sum(skipna=False)),
+            )
+    )
+    df_ili = df_ili.pivot(index=['date','year','week'], columns='location', values="%UNWEIGHTED ILI").reset_index()
+    df_ili['US'] = np.round(100*(us_totals['total_ili']) / us_totals['total_patients'],6)
+    ili_data_fname = data_dir + "ili_cases_{}_{}.csv".format(epiyear,epiweek)
+    df_ili.to_csv(ili_data_fname, index=False)
+    return df_ili
 
 
 def read_lab_selected_data(data_dir, epiyear, epiweek, states, loc_name2abbr, sel_col, plot=True):
@@ -442,7 +472,7 @@ def read_lab_selected_data(data_dir, epiyear, epiweek, states, loc_name2abbr, se
     lab_data_fname = data_dir + "lab_cases_{}_{}.csv".format(epiyear,epiweek)
     df_lab = pd.read_csv(lab_data_fname, na_values="X")
     df_lab['date'] = df_lab.apply(lambda row: epiweek_to_dates(row['year'], row['week']).enddate(), axis=1)
-    df_lab['date'] = pd.to_datetime(df_lab['date'], format='%Y-%m-%d') #format='%m/%d/%Y') #
+    df_lab['date'] = parse_date_column(df_lab, 'date')
     df_lab = df_lab[['date'] + [col for col in df_lab.columns if col != 'date']]
     df_lab['location'] = df_lab['location'].replace(loc_name2abbr)
     df_lab = df_lab[df_lab.location.isin(states)]
@@ -477,18 +507,27 @@ def read_lab_selected_data(data_dir, epiyear, epiweek, states, loc_name2abbr, se
     return df_lab_sel
 
 
-def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp, 
+def read_ili_incidence_data(data_dir, epiyear, epiweek, states, df_hosp,
                             smooth=False, scale=False, regress=False, plot=False):
 
     ili_data_fname = data_dir + "ili_cases_{}_{}.csv".format(epiyear,epiweek)
     if not os.path.exists(ili_data_fname):
         epiweek_range = f"201001-{epiyear}{epiweek:02d}"
-        df_ili = fetch_ili_data(states, epiweek_range)
+        df_ili = fetch_ili_data(list(states), epiweek_range)
         df_ili.to_csv(ili_data_fname,index=False)
     else:
         df_ili = pd.read_csv(ili_data_fname)
 
-    df_ili['date'] = pd.to_datetime(df_ili['date'], format='%Y-%m-%d') #format='%m/%d/%Y') #        
+    df_ili['date'] = pd.to_datetime(df_ili['date'], format='%Y-%m-%d') #format='%m/%d/%Y') #   
+    first_date = pd.to_datetime("2010-10-09")
+    df_ili = df_ili[df_ili["date"]>=first_date]
+
+    #Fill missing values for FL/LA using US column
+    mask_FL = df_ili["FL"].isna()
+    mask_LA = df_ili["LA"].isna()
+    df_ili.loc[mask_FL, "FL"] = df_ili.loc[mask_FL, "US"] 
+    df_ili.loc[mask_LA, "LA"] = df_ili.loc[mask_LA, "US"] 
+
     if(smooth):
         df_ili.iloc[:, 3:] = df_ili.iloc[:, 3:].astype(float)
         df_ili.iloc[:, 3:] = df_ili.iloc[:, 3:].rolling(window=3, min_periods=1).mean()
@@ -632,6 +671,164 @@ def load_and_format_nowcast_pred(path, ref_date, loc_name2loc):
     return out
 
 
+def replace_last_data_point_with_nowcast_pred(
+    df_hosp: pd.DataFrame,
+    df_nowcast_pred: pd.DataFrame,
+    *,
+    plot: bool = True,
+    n_weeks_plot: int = 4,
+    ncols: int = 8,
+    figsize_per_ax: tuple[float, float] = (3.0, 2.4),
+    show_quantile_points: bool = True,
+    # assume ONE interval pair only (default 95% CI)
+    interval_pair: tuple[float, float] = (0.025, 0.975),
+):
+    """
+    - Returns df_out: df_hosp with the last date value per location replaced by nowcast median (q=0.5).
+    - Plot (if plot=True) shows ORIGINAL df_hosp last n_weeks_plot, with the LAST observed point in red,
+      and overlays nowcast quantiles at last_date. Also draws ONE interval (interval_pair) as a clear vertical errorbar.
+    """
+    # --- Copies
+    df_out = df_hosp.copy()
+    df_p = df_nowcast_pred.copy()
+
+    # --- Parse types
+    df_out["date"] = pd.to_datetime(df_out["date"])
+    df_p["reference_date"] = pd.to_datetime(df_p["reference_date"])
+    df_p["target_end_date"] = pd.to_datetime(df_p["target_end_date"])
+    df_p["output_type_id"] = pd.to_numeric(df_p["output_type_id"], errors="coerce")
+
+    # --- Determine locations
+    meta_cols = {"date", "year", "week"}
+    locations = [c for c in df_out.columns if c not in meta_cols]
+
+    # --- Last date/row(s)
+    df_out = df_out.sort_values("date")
+    last_date = df_out["date"].max()
+    last_rows = df_out.index[df_out["date"] == last_date].tolist()  # robust if duplicates
+
+    # --- Filter nowcast preds for last_date and target/horizon
+    target = "wk inc flu hosp"
+    horizon = -1
+    pred_all = df_p[
+        (df_p["target"] == target)
+        & (df_p["output_type"] == "quantile")
+        & (df_p["target_end_date"] == last_date)
+        & (df_p["horizon"] == horizon)
+    ].copy()
+
+    # --- Build median map (location -> median)
+    median_q = 0.5
+    pred_med = pred_all[
+        pred_all["output_type_id"].notna() & np.isclose(pred_all["output_type_id"], float(median_q))
+    ]
+    med_map = (
+        pred_med.sort_values("reference_date")
+        .groupby("location")["value"]
+        .last()
+        .to_dict()
+    )
+
+    # --- Replace last observed values with median
+    for loc in locations:
+        if loc in med_map and pd.notna(med_map[loc]):
+            for idx in last_rows:
+                df_out.at[idx, loc] = med_map[loc]
+
+    # --- Plot (uses ORIGINAL df_hosp)
+    if not plot:
+        return df_out
+
+    df_plot = df_hosp.copy()
+    df_plot["date"] = pd.to_datetime(df_plot["date"])
+    df_plot = df_plot.sort_values("date")
+
+    df_last = df_plot.tail(n_weeks_plot)
+
+    # long for plotting
+    obs_long = df_last.melt(
+        id_vars=["date", "year", "week"],
+        value_vars=locations,
+        var_name="location",
+        value_name="obs",
+    )
+
+    # Subplot grid
+    n = len(locations)
+    ncols_eff = min(ncols, n)
+    nrows = math.ceil(n / ncols_eff)
+    figsize = (figsize_per_ax[0] * ncols_eff, figsize_per_ax[1] * nrows)
+
+    fig, axes = plt.subplots(nrows, ncols_eff, figsize=figsize, sharex=True)
+    axes = np.array(axes).reshape(-1)
+
+    qlo, qhi = interval_pair
+
+    for i, loc in enumerate(locations):
+        ax = axes[i]
+
+        s_obs = obs_long[obs_long["location"] == loc].sort_values("date")
+
+        # Line for observed
+        ax.plot(s_obs["date"], s_obs["obs"], marker="o", linewidth=1.8)
+
+        # Highlight LAST observed point (red)
+        s_last = s_obs.iloc[-1:]
+        ax.scatter(s_last["date"], s_last["obs"], s=45, zorder=6, color="red")
+
+        # Nowcast quantiles
+        s_pred = (
+            pred_all[pred_all["location"] == loc]
+            .dropna(subset=["output_type_id", "value"])
+            .sort_values("output_type_id")
+        )
+
+        if not s_pred.empty:
+            y = s_pred["value"].to_numpy()
+
+            # Optional: show all quantile points at last_date
+            if show_quantile_points:
+                ax.scatter([last_date] * len(y), y, s=14, alpha=0.5)
+
+            # Median marker (diamond)
+            med = s_pred.loc[np.isclose(s_pred["output_type_id"], float(median_q)), "value"]
+            if len(med) > 0:
+                ax.scatter([last_date], [float(med.iloc[0])], s=55, marker="D", zorder=7)
+
+            # ONE interval: draw as errorbar centered at median (much clearer than thick vlines)
+            ylo = s_pred.loc[np.isclose(s_pred["output_type_id"], qlo), "value"]
+            yhi = s_pred.loc[np.isclose(s_pred["output_type_id"], qhi), "value"]
+            if len(med) > 0 and len(ylo) > 0 and len(yhi) > 0:
+                m = float(med.iloc[0])
+                lo = float(ylo.iloc[0])
+                hi = float(yhi.iloc[0])
+                ax.errorbar(
+                    x=[last_date],
+                    y=[m],
+                    yerr=[[m - lo], [hi - m]],
+                    fmt="none",
+                    capsize=3,
+                    elinewidth=2,
+                    zorder=6,
+                )
+
+        ax.set_title(loc, fontsize=10)
+        ax.tick_params(axis="x", labelrotation=45)
+        ax.grid(True, alpha=0.25)
+
+    for j in range(n, len(axes)):
+        axes[j].axis("off")
+
+    fig.suptitle(
+        f"Last {n_weeks_plot} weeks observed (last obs in red) + nowcast (median + {int((qhi-qlo)*100)}% interval) on {last_date.date()}",
+        y=1.02,
+        fontsize=14,
+    )
+    fig.tight_layout()
+    plt.show()
+
+    return df_out
+
 # def calculate_wis0(truth, df_pred, alpha_vals):
 #     wis_vals = 0
 #     if hasattr(truth, "__len__"):
@@ -665,6 +862,36 @@ def calculate_wis(truth, df_pred, alpha_vals):
     K = len(alpha_vals)
     wis_vals = wis_vals/(K+0.5)
     return wis_vals
+
+
+# def calculate_wis(truth, df_pred, alpha_vals):
+#     median = df_pred.loc[df_pred['quantile'] == 0.5, 'value'].values
+#     wis_vals = 0.5 * np.abs(median - truth)  # 0.5 * |y - m|
+
+#     for alpha in alpha_vals:
+#         lower_q = np.round(alpha / 2.0, 3)
+#         upper_q = np.round(1.0 - alpha / 2.0, 3)
+
+#         l = df_pred.loc[df_pred['quantile'] == lower_q, 'value'].values
+#         u = df_pred.loc[df_pred['quantile'] == upper_q, 'value'].values
+
+#         width = u - l
+#         too_low = (truth < l).astype(float)
+#         too_high = (truth > u).astype(float)
+
+#         IS = (
+#             width
+#             + (2.0 / alpha) * (l - truth) * too_low
+#             + (2.0 / alpha) * (truth - u) * too_high
+#         )
+
+#         wis_vals += (alpha / 2.0) * IS   # weight α/2
+
+#     K = len(alpha_vals)
+#     wis_vals = wis_vals / (K + 0.5)
+#     return wis_vals
+
+
 
 def load_pred_result_files(basedir, model_desc, locations):
 
@@ -755,27 +982,56 @@ def generate_qualtitative_pred(ref_date, location, horizon, samples, ref_val, po
     return pred_results
 
 
-def merge_pred_results(results_dict):
+# def merge_pred_results(results_dict):
 
-    if(len(results_dict)<2) :
+#     if(len(results_dict)<2) :
+#         print('Error: size of dictionary is smaller than 2')
+#         return None
+    
+#     models = list(results_dict.keys())
+#     model = models[0]
+#     df_merged = results_dict[model].rename(columns={'value': model})
+#     for model in models[1:]:
+#         df_merged2 = results_dict[model].rename(columns={'value': model })
+#         df_merged = df_merged.merge(df_merged2,how='inner',
+#                                         on=['reference_date','target','horizon','target_end_date',
+#                                             'location','output_type','output_type_id']) 
+#     return (df_merged)
+
+
+def merge_pred_results(results_dict, start_date):
+
+    if len(results_dict) < 2:
         print('Error: size of dictionary is smaller than 2')
         return None
-    
-    models = list(results_dict.keys())
-    model = models[0]
-    df_merged = results_dict[model].rename(columns={'value': model})
-    for model in models[1:]:
-        df_merged2 = results_dict[model].rename(columns={'value': model })
-        df_merged = df_merged.merge(df_merged2,how='inner',
-                                        on=['reference_date','target','horizon','target_end_date',
-                                            'location','output_type','output_type_id']) 
-    return (df_merged)
+
+    key_cols = [
+        'reference_date', 'target', 'horizon', 'target_end_date',
+        'location', 'output_type', 'output_type_id'
+    ]
+
+    df_merged = None
+    for model_name, df in results_dict.items():
+        df_model = df.rename(columns={'value': model_name})
+        df_model = df_model[key_cols + [model_name]]
+        df_model = df_model[df_model['reference_date'] >= start_date]
+        if df_merged is None:
+            df_merged = df_model
+        else:
+            df_merged = pd.merge(
+                df_merged,
+                df_model,
+                how='outer',  
+                on=key_cols
+            )
+    return df_merged
+
         
     
-def generate_mean_ensemble_pred_results(results_dict, basedir, ensemble_name):
+def generate_mean_ensemble_pred_results(results_dict, start_date, basedir, ensemble_name):
 
     models = list(results_dict.keys())
-    df_ensemble = merge_pred_results(results_dict)
+    df_ensemble = merge_pred_results(results_dict, start_date)
     df_ensemble['value'] = np.round(df_ensemble[models].mean(axis=1),3)
     df_ensemble = df_ensemble.drop(labels=models,axis=1)
 
@@ -856,11 +1112,11 @@ def generate_pred_weights(results_dict, df_metrics, locations,
     return df_weights
 
 
-def generate_weighted_pred_results(results_dict, df_weights, locations,
+def generate_weighted_pred_results(results_dict, start_date, df_weights, locations,
                                    basedir, ensemble_name, average_over_horizons=False):
 
     models = list(results_dict.keys())
-    df_ensemble = merge_pred_results(results_dict)
+    df_ensemble = merge_pred_results(results_dict, start_date)
 
     # Default: simple (unweighted) mean for all rows
     df_ensemble['value'] = np.round(df_ensemble[models].mean(axis=1), 3)
@@ -1036,7 +1292,8 @@ def generate_weighted_pred_results(results_dict, df_weights, locations,
 
 
 def calc_models_pred_fit(df_dat, models, season, locations, 
-                         results_dir, figures_dir, alpha_vals, plot=True):
+                         results_dir, figures_dir, alpha_vals, 
+                         plot=True, edv=False, pop_per_loc=None):
     
     df_metrics_all = pd.DataFrame({
         'location': pd.Series(dtype='str'),
@@ -1054,7 +1311,7 @@ def calc_models_pred_fit(df_dat, models, season, locations,
         start_date='2024-11-23'
         end_date='2025-05-31' 
     elif(season == 2026):
-        start_date='2025-10-25' #'2025-11-22'
+        start_date='2025-11-01' #'2025-11-22' 
         end_date='2026-05-23' 
     else:
         print('unsupported season')
@@ -1069,6 +1326,14 @@ def calc_models_pred_fit(df_dat, models, season, locations,
         if(season==2025):
             #no data for this date at real time - no pred were made
             df_results = df_results[df_results["reference_date"]!=pd.to_datetime("2025-01-25")]
+
+        if(edv):
+            df_results = df_results[df_results["target"]=='wk inc flu prop ed visits']
+            if(df_results.empty):
+                print("No ed visit pred results for model: {}".format(model))
+                continue
+            df_results['target'] = 'wk inc flu hosp'
+            df_results["value"] = np.round(df_results["value"]*df_results["location"].map(pop_per_loc)/1e3,4)
 
         print("-----------Calculating metrics for model: {}-----------".format(model))
         for loc_abbr in locations.index:
@@ -1133,7 +1398,10 @@ def calc_and_plot_pred_results_fit(df_results, df_dat, locations, loc_abbr, alph
         #(fit_dates, dev_vals, wis_vals, pred_std, pred_bias, dev_rate_vals, wis_rate_vals) = calc_pred_fit_ex(df_pred, df_dat, alpha_vals, pop_size)
         (fit_dates, dev_vals, wis_vals) = calc_pred_fit(df_pred, df_dat, alpha_vals)
 
-    
+        # If there are no fit dates skip this horizon
+        if len(fit_dates) == 0:
+            continue
+
         for j, fit_date in enumerate(fit_dates):
             date = format(fit_date,'%Y-%m-%d')
             df_metrics.loc[len(df_metrics.index)] = [loc_abbr, model_desc, horizon, date, 'dev', dev_vals[j]]
@@ -1143,7 +1411,7 @@ def calc_and_plot_pred_results_fit(df_results, df_dat, locations, loc_abbr, alph
         wis = np.round(np.mean(wis_vals),2)
 
         if(plot):
-            axes[i].plot(df_dat.date, df_dat.value ,label='data')
+            axes[i].plot(df_dat.date, df_dat.value ,label='data',color='red')
             axes[i].plot(df_pred.date[df_pred['quantile']==0.5], 
                         df_pred.value[df_pred['quantile']==0.5], 
                         label="pred", color='blue', alpha=1)
@@ -1247,6 +1515,174 @@ def plot_pred_results_fit2(df_results, df_dat, locations, loc_abbr, basedir, mod
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
     plt.savefig(output_dir +"/" +loc_abbr + ".png", format="png", bbox_inches="tight", dpi=300)
+
+
+def plot_multi_models_forecasts(df_dat, models, season, locations, ref_date,
+                          results_dir, figures_dir,
+                          target='wk inc flu hosp',
+                          quantiles=(0.025, 0.5, 0.975)):
+    # season window
+    if season == 2024:
+        start_date, end_date = '2023-10-14', '2024-04-13'
+    elif season == 2025:
+        start_date, end_date = '2024-11-23', '2025-05-31'
+    elif season == 2026:
+        start_date, end_date = '2025-11-01', '2026-05-23'
+    else:
+        print('unsupported season')
+        return
+
+    # load predictions
+    preds = {}
+    for model in models:
+        df = load_pred_result_files(results_dir, model, locations)
+        if df is None:
+            continue
+        df = df[
+            (df['target'] == target) &
+            (df['output_type'] == 'quantile') &
+            (df['reference_date'] >= pd.to_datetime(start_date)) &
+            (df['reference_date'] <= pd.to_datetime(end_date))
+        ].copy()
+        if season == 2025:
+            df = df[df['reference_date'] != pd.to_datetime("2025-01-25")]
+        if df.empty:
+            continue
+        df['output_type_id'] = df['output_type_id'].astype(float)
+        preds[model] = df
+
+    if not preds:
+        print("No forecasts loaded for requested models.")
+        return
+
+    # plotting
+    # output_dir = f"{figures_dir}/multi_model_forecasts"
+    output_dir = f"{figures_dir}/{ref_date:%Y%m%d}_" + "_".join(models)
+    os.makedirs(output_dir, exist_ok=True)
+
+    horizons = sorted(
+        np.unique(np.concatenate([df['horizon'].unique() for df in preds.values()]))
+    )
+
+    for loc_abbr in locations.index:
+        location = locations.loc[loc_abbr].location
+        df_truth = df_dat.loc[:, ['date', loc_abbr]].rename(columns={loc_abbr: 'value'})
+        df_truth = df_truth[
+            (df_truth['date'] >= pd.to_datetime(start_date)) &
+            (df_truth['date'] <= pd.to_datetime(end_date))
+        ]
+        if df_truth.empty:
+            continue
+
+        fig, axes = plt.subplots(len(horizons), 1, figsize=(7, 2.5 * len(horizons)), sharex=True)
+        if len(horizons) == 1:
+            axes = [axes]
+
+        for ax, horizon in zip(axes, horizons):
+            ax.plot(df_truth['date'], df_truth['value'], color='black', label='truth')
+
+            for model, df in preds.items():
+                df_loc = df[(df['location'] == location) & (df['horizon'] == horizon)]
+                if df_loc.empty:
+                    continue
+                df_piv = df_loc.pivot(index='target_end_date', columns='output_type_id', values='value')
+                if not all(q in df_piv.columns for q in quantiles):
+                    continue
+                df_piv = df_piv.sort_index()
+                ax.fill_between(df_piv.index, df_piv[quantiles[0]], df_piv[quantiles[2]],
+                                alpha=0.15, label=f'{model} {int((quantiles[2]-quantiles[0])*100)}%')
+                ax.plot(df_piv.index, df_piv[quantiles[1]], label=f'{model} median')
+
+            ax.set_title(f"{loc_abbr} – horizon {horizon} weeks")
+            ax.set_ylabel('hosp cases')
+            ax.legend(loc='upper left', fontsize=8)
+
+        axes[-1].set_xlabel('date')
+        plt.xticks(rotation=90)
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/{loc_abbr}.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_multi_models_forecasts_all_horizons(df_dat, models, season, locations, ref_date,
+                                            results_dir, figures_dir,
+                                            target='wk inc flu hosp',
+                                            quantiles=(0.025, 0.5, 0.975)):
+    """
+    One figure per location; all horizons from a single ref_date overlaid for each model.
+    Shows median + provided quantile band (default 95%).
+    """
+    # season window
+    if season == 2024:
+        start_date, end_date = '2023-10-14', '2024-04-13'
+    elif season == 2025:
+        start_date, end_date = '2024-11-23', '2025-05-31'
+    elif season == 2026:
+        start_date, end_date = '2025-11-01', '2026-05-23'
+    else:
+        print('unsupported season')
+        return
+
+    # load forecasts for the given ref_date
+    preds = {}
+    for model in models:
+        df = load_pred_result_files(results_dir, model, locations)
+        if df is None:
+            continue
+        df = df[
+            (df['target'] == target) &
+            (df['output_type'] == 'quantile') &
+            (df['reference_date'] == ref_date) &
+            (df['reference_date'] >= pd.to_datetime(start_date)) &
+            (df['reference_date'] <= pd.to_datetime(end_date))
+        ].copy()
+        if df.empty:
+            continue
+        df['output_type_id'] = df['output_type_id'].astype(float)
+        preds[model] = df
+
+    if not preds:
+        print("No forecasts loaded for requested models/ref_date.")
+        return
+
+    # unique output folder: ref_date + model names
+    output_dir = f"{figures_dir}/{ref_date:%Y%m%d}_" + "_".join(models) + "_allh"
+    os.makedirs(output_dir, exist_ok=True)
+
+    for loc_abbr in locations.index:
+        location = locations.loc[loc_abbr].location
+        df_truth = df_dat.loc[:, ['date', loc_abbr]].rename(columns={loc_abbr: 'value'})
+        df_truth = df_truth[
+            (df_truth['date'] >= pd.to_datetime(start_date)) &
+            (df_truth['date'] <= pd.to_datetime(end_date))
+        ]
+        if df_truth.empty:
+            continue
+
+        plt.figure(figsize=(7, 4))
+        plt.plot(df_truth['date'], df_truth['value'], color='black', label='truth')
+        plt.axvline(ref_date, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+
+        for model, df in preds.items():
+            df_loc = df[df['location'] == location]
+            if df_loc.empty:
+                continue
+            df_piv = df_loc.pivot(index='target_end_date', columns='output_type_id', values='value')
+            if not all(q in df_piv.columns for q in quantiles):
+                continue
+            df_piv = df_piv.sort_index()
+            plt.fill_between(df_piv.index, df_piv[quantiles[0]], df_piv[quantiles[2]],
+                             alpha=0.15, label=f'{model} {int((quantiles[2]-quantiles[0])*100)}%')
+            plt.plot(df_piv.index, df_piv[quantiles[1]], label=f'{model} median')
+
+        plt.title(f"{loc_abbr} – forecasts issued {ref_date:%Y-%m-%d}")
+        plt.ylabel('hosp cases')
+        plt.xlabel('date')
+        plt.xticks(rotation=90)
+        plt.legend(loc='upper left', fontsize=8)
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/{loc_abbr}.png", dpi=300, bbox_inches="tight")
+        plt.close()
 
 
 def update_hosp_with_nowcast(data_dir, df_hosp, cur_date):
